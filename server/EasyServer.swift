@@ -18,6 +18,9 @@ import Network
 import FoundationNetworking
 #endif
 
+// stdout 버퍼링 해제 (nohup 등에서 즉시 출력)
+setbuf(stdout, nil)
+
 let PORT: UInt16 = 7777
 
 // MARK: - Relay Mode Detection
