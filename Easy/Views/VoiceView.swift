@@ -1,12 +1,25 @@
 import SwiftUI
 
 struct VoiceView: View {
-    @State private var vm = VoiceViewModel()
+    @Bindable var vm: VoiceViewModel
     @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                // Relay 연결 상태 바
+                if vm.connectionMode == .relay {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(relayDotColor)
+                            .frame(width: 8, height: 8)
+                        Text(relayStatusLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 // Messages
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -102,6 +115,24 @@ struct VoiceView: View {
         case .speaking: "speaker.wave.2.fill"
         }
     }
+
+    private var relayDotColor: Color {
+        switch vm.relayState {
+        case .disconnected: .red
+        case .connecting: .orange
+        case .connected: .yellow
+        case .paired: .green
+        }
+    }
+
+    private var relayStatusLabel: String {
+        switch vm.relayState {
+        case .disconnected: "Relay 연결 안됨"
+        case .connecting: "연결 중..."
+        case .connected: "연결됨"
+        case .paired: "E2E 암호화 활성"
+        }
+    }
 }
 
 struct MessageBubble: View {
@@ -123,5 +154,5 @@ struct MessageBubble: View {
 }
 
 #Preview {
-    VoiceView()
+    VoiceView(vm: VoiceViewModel())
 }

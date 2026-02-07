@@ -6,9 +6,22 @@
 	<string>음성 명령을 인식하기 위해 마이크가 필요합니다.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>음성을 텍스트로 변환하기 위해 음성 인식이 필요합니다.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>QR 코드를 스캔하여 Mac 서버와 페어링하기 위해 카메라가 필요합니다.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.ghost.easy</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>easy</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

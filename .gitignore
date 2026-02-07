@@ -14,3 +14,4 @@ build/
 __pycache__/
 *.pyc
 server/easy-server
+node_modules/
