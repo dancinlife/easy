@@ -1,0 +1,16 @@
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+.build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+.DS_Store
+*.swp
+*.swo
+.venv/
+__pycache__/
+*.pyc
+server/easy-server
