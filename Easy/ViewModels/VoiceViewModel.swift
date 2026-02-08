@@ -60,11 +60,10 @@ final class VoiceViewModel {
     }
 
     // Settings
-    var silenceTimeout: TimeInterval {
-        get { speech.silenceTimeout }
-        set {
-            speech.silenceTimeout = newValue
-            UserDefaults.standard.set(newValue, forKey: "silenceTimeout")
+    var silenceTimeout: TimeInterval = UserDefaults.standard.object(forKey: "silenceTimeout") as? TimeInterval ?? 3.0 {
+        didSet {
+            speech.silenceTimeout = silenceTimeout
+            UserDefaults.standard.set(silenceTimeout, forKey: "silenceTimeout")
         }
     }
     var autoListen: Bool {
@@ -103,15 +102,10 @@ final class VoiceViewModel {
 
     // Theme
     var theme: String = UserDefaults.standard.string(forKey: "theme") ?? "system" {
-        didSet {
-            UserDefaults.standard.set(theme, forKey: "theme")
-            preferredColorScheme = Self.colorScheme(for: theme)
-        }
+        didSet { UserDefaults.standard.set(theme, forKey: "theme") }
     }
 
-    var preferredColorScheme: ColorScheme?
-
-    private static func colorScheme(for theme: String) -> ColorScheme? {
+    var preferredColorScheme: ColorScheme? {
         switch theme {
         case "light": .light
         case "dark": .dark
@@ -146,14 +140,13 @@ final class VoiceViewModel {
     }
 
     init() {
-        preferredColorScheme = Self.colorScheme(for: theme)
         currentSessionId = UserDefaults.standard.string(forKey: "currentSessionId")
         if currentSessionId == nil, let first = sessionStore.sessions.first {
             currentSessionId = first.id
         }
         loadSessionMessages()
 
-        speech.silenceTimeout = UserDefaults.standard.object(forKey: "silenceTimeout") as? TimeInterval ?? 3.0
+        speech.silenceTimeout = silenceTimeout
         speech.sttLanguage = sttLanguage
         speech.speakerMode = UserDefaults.standard.object(forKey: "speakerMode") as? Bool ?? false
         speech.whisperService = whisper

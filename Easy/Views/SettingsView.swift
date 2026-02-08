@@ -123,7 +123,7 @@ struct SettingsView: View {
                     Stepper(
                         "Silence \(String(format: "%.1f", vm.silenceTimeout))s",
                         value: $vm.silenceTimeout,
-                        in: 1.0...5.0,
+                        in: 1.0...10.0,
                         step: 0.5
                     )
                     .monospacedDigit()
@@ -190,7 +190,6 @@ struct SettingsView: View {
                 }
             }
         }
-        .preferredColorScheme(vm.preferredColorScheme)
     }
 
     private var maskedKey: String {

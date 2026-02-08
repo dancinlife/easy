@@ -3,6 +3,7 @@ import SwiftUI
 struct SessionListView: View {
     @Bindable var vm: VoiceViewModel
     @Binding var path: NavigationPath
+    @Environment(\.colorScheme) private var systemColorScheme
     @State private var showSettings = false
     @State private var showQRScanner = false
 
@@ -82,6 +83,7 @@ struct SessionListView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(vm: vm)
+                .preferredColorScheme(vm.preferredColorScheme ?? systemColorScheme)
         }
         .sheet(isPresented: $showQRScanner) {
             QRScannerView { info in
