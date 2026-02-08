@@ -334,6 +334,27 @@ actor RelayService {
                 log.error("server_info decryption failed: \(error)")
             }
 
+        case "session_end":
+            guard let sessionKey,
+                  let encryptedBase64 = payload["encrypted"] as? String,
+                  let encryptedData = Data(base64URLEncoded: encryptedBase64) else { return }
+
+            do {
+                let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+                let plainData = try AES.GCM.open(sealedBox, using: sessionKey)
+
+                guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
+                      let sessionId = json["sessionId"] as? String else { return }
+
+                log.notice("session_end received: \(sessionId)")
+                let callback = onSessionEnd
+                Task { @MainActor in
+                    callback?(sessionId)
+                }
+            } catch {
+                log.error("session_end decryption failed: \(error)")
+            }
+
         case "server_shutdown":
             log.notice("server_shutdown received")
             state = .disconnected

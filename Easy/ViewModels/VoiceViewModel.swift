@@ -228,6 +228,18 @@ final class VoiceViewModel {
             }
         }
 
+        relay.onSessionEnd = { [weak self] sessionId in
+            Task { @MainActor in
+                guard let self else { return }
+                log.info("session_end: \(sessionId)")
+                self.sessionStore.deleteSession(id: sessionId)
+                if self.currentSessionId == sessionId {
+                    self.stopAll()
+                    self.currentSessionId = self.sessionStore.sessions.first?.id
+                }
+            }
+        }
+
         relay.onStateChanged = { [weak self] newState in
             Task { @MainActor in
                 guard let self else { return }

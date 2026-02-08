@@ -386,8 +386,24 @@ class RelayConnector {
     }
   }
 
+  sendSessionEnd(sessionId) {
+    if (!this.sessionKey) return;
+    try {
+      const plain = Buffer.from(JSON.stringify({ sessionId }));
+      const encrypted = aesGcmEncrypt(plain, this.sessionKey);
+      this.send({ type: "message", payload: { type: "session_end", encrypted: base64url(encrypted) } });
+      console.log(`[Relay] session_end sent: ${sessionId}`);
+    } catch (err) {
+      console.log(`[Error] session_end send failed: ${err.message}`);
+    }
+  }
+
   sendShutdown() {
     if (!this.sessionKey) return;
+    // End all active sessions first
+    for (const sid of activeSessions) {
+      this.sendSessionEnd(sid);
+    }
     try {
       const plain = Buffer.from(JSON.stringify({ type: "server_shutdown" }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
