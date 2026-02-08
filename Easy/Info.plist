@@ -18,6 +18,8 @@
 	<string>APPL</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Microphone is needed for voice recognition.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Speech recognition is used to detect the wake word "easy".</string>
 <key>NSCameraUsageDescription</key>
 	<string>Camera is needed to scan QR codes for pairing with Mac server.</string>
 	<key>UIBackgroundModes</key>

@@ -1,6 +1,5 @@
 import Foundation
 import AVFoundation
-import AudioToolbox
 import UIKit
 
 @Observable
@@ -12,6 +11,7 @@ final class VoiceViewModel {
     var error: String?
     var recognizedText: String = ""
     var isActivated: Bool = false
+    var debugLog: String = ""
 
     // Utterance Queue (mcp-voice-hooks pattern)
     private var pendingUtterances: [String] = []
@@ -108,6 +108,13 @@ final class VoiceViewModel {
         tts.apiKey = openAIKey.isEmpty ? nil : openAIKey
         tts.voice = ttsVoice
 
+        // Debug log
+        speech.onDebugLog = { [weak self] text in
+            Task { @MainActor in
+                self?.debugLog = text
+            }
+        }
+
         // Real-time text updates
         speech.onTextChanged = { [weak self] text in
             Task { @MainActor in
@@ -120,7 +127,7 @@ final class VoiceViewModel {
             Task { @MainActor in
                 guard let self else { return }
                 self.isActivated = true
-                AudioServicesPlaySystemSound(1057)
+                self.speech.playDing()
             }
         }
 

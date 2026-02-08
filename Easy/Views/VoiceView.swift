@@ -43,6 +43,14 @@ struct VoiceView: View {
                 statusText
                     .padding(.horizontal, 16)
 
+                // Debug
+                if !vm.debugLog.isEmpty {
+                    Text(vm.debugLog)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.gray)
+                        .padding(.horizontal, 16)
+                }
+
                 // Error
                 if let error = vm.error {
                     Text(error)
