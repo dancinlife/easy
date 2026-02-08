@@ -1,5 +1,8 @@
 import Foundation
 import AVFoundation
+import os
+
+private let log = Logger(subsystem: "com.ghost.easy", category: "tts")
 
 @Observable
 @MainActor
@@ -17,7 +20,7 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
         stop()
 
         guard let apiKey, !apiKey.isEmpty else {
-            print("[TTS] API key not set")
+            log.warning("API key not set")
             onFinished?()
             return
         }
@@ -31,7 +34,7 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
                 try playAudio(audioData)
             } catch {
                 guard !Task.isCancelled else { return }
-                print("[TTS] Error: \(error.localizedDescription)")
+                log.error("Error: \(error.localizedDescription)")
                 isSpeaking = false
                 onFinished?()
             }

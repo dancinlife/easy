@@ -1,5 +1,8 @@
 import Foundation
 import CryptoKit
+import os
+
+private let log = Logger(subsystem: "com.ghost.easy", category: "relay")
 
 /// E2E encrypted communication service via Relay server
 actor RelayService {
@@ -67,7 +70,7 @@ actor RelayService {
         self.pairingInfo = info
         state = .connecting
 
-        print("[RelayService] Connecting: \(info.relayURL) room: \(info.room)")
+        log.info("Connecting: \(info.relayURL) room: \(info.room)")
 
         urlSession = URLSession(configuration: .default)
 
@@ -94,7 +97,7 @@ actor RelayService {
 
         guard connectionId == myConnectionId else { return }
         state = .paired
-        print("[RelayService] Pairing complete")
+        log.notice("Pairing complete")
     }
 
     func disconnect() {
@@ -156,9 +159,9 @@ actor RelayService {
                 ] as [String: Any]
             ]
             try await sendJSON(msg)
-            print("[RelayService] session_end sent: \(sessionId)")
+            log.info("session_end sent: \(sessionId)")
         } catch {
-            print("[RelayService] session_end send failed: \(error)")
+            log.error("session_end send failed: \(error)")
         }
     }
 
@@ -218,7 +221,7 @@ actor RelayService {
     private func sendPing() {
         webSocketTask?.sendPing { error in
             if let error {
-                print("[RelayService] Ping failed: \(error.localizedDescription)")
+                log.warning("Ping failed: \(error.localizedDescription)")
             }
         }
     }
@@ -268,7 +271,7 @@ actor RelayService {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else { return }
 
-        print("[RelayService] Received: type=\(type) payload.type=\((json["payload"] as? [String: Any])?["type"] as? String ?? "N/A")")
+        log.debug("Received: type=\(type) payload.type=\((json["payload"] as? [String: Any])?["type"] as? String ?? "N/A")")
 
         switch type {
         case "joined":
@@ -276,7 +279,7 @@ actor RelayService {
         case "peer_joined":
             break
         case "peer_left":
-            print("[RelayService] peer_left — server disconnected")
+            log.notice("peer_left — server disconnected")
             sessionKey = nil
             state = .disconnected
         case "message":
@@ -308,25 +311,25 @@ actor RelayService {
                       let hostname = json["hostname"] as? String else { return }
 
                 let info = ServerInfo(workDir: workDir, hostname: hostname)
-                print("[RelayService] server_info received: workDir=\(workDir) hostname=\(hostname)")
+                log.info("server_info received: workDir=\(workDir) hostname=\(hostname)")
                 let callback = onServerInfo
                 Task { @MainActor in
                     callback?(info)
                 }
             } catch {
-                print("[RelayService] server_info decryption failed: \(error)")
+                log.error("server_info decryption failed: \(error)")
             }
 
         case "server_shutdown":
-            print("[RelayService] server_shutdown received")
+            log.notice("server_shutdown received")
             state = .disconnected
 
         case "text_answer":
-            print("[RelayService] text_answer received, sessionKey=\(sessionKey != nil), continuation=\(pendingTextContinuation != nil)")
+            log.info("text_answer received, sessionKey=\(self.sessionKey != nil), continuation=\(self.pendingTextContinuation != nil)")
             guard let sessionKey,
                   let encryptedBase64 = payload["encrypted"] as? String,
                   let encryptedData = Data(base64URLEncoded: encryptedBase64) else {
-                print("[RelayService] text_answer guard failed")
+                log.error("text_answer guard failed")
                 pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                 pendingTextContinuation = nil
                 return
@@ -338,17 +341,17 @@ actor RelayService {
 
                 guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
                       let answer = json["answer"] as? String else {
-                    print("[RelayService] text_answer JSON parse failed")
+                    log.error("text_answer JSON parse failed")
                     pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                     pendingTextContinuation = nil
                     return
                 }
 
-                print("[RelayService] text_answer decrypted: \(answer.prefix(50))")
+                log.info("text_answer decrypted: \(answer.prefix(50))")
                 pendingTextContinuation?.resume(returning: answer.trimmingCharacters(in: .whitespacesAndNewlines))
                 pendingTextContinuation = nil
             } catch {
-                print("[RelayService] text_answer decryption failed: \(error)")
+                log.error("text_answer decryption failed: \(error)")
                 pendingTextContinuation?.resume(throwing: RelayError.decryptionFailed)
                 pendingTextContinuation = nil
             }

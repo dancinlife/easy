@@ -1,6 +1,9 @@
 import Foundation
 import AVFoundation
 import UIKit
+import os
+
+private let log = Logger(subsystem: "com.ghost.easy", category: "voicevm")
 
 @Observable
 @MainActor
@@ -108,7 +111,7 @@ final class VoiceViewModel {
         tts.apiKey = openAIKey.isEmpty ? nil : openAIKey
         tts.voice = ttsVoice
 
-        // Debug log
+        // Wake word debug (shows which word triggered)
         speech.onDebugLog = { [weak self] text in
             Task { @MainActor in
                 self?.debugLog = text
@@ -122,10 +125,13 @@ final class VoiceViewModel {
             }
         }
 
-        // Wake word detected → ding + activate
+        // Wake word detected → stop TTS if playing → ding + activate
         speech.onTriggerDetected = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
+                if self.status == .speaking {
+                    self.tts.stop()
+                }
                 self.isActivated = true
                 self.speech.playDing()
             }
@@ -245,6 +251,7 @@ final class VoiceViewModel {
         speech.stopListening()
         status = .thinking
         recognizedText = text
+        log.info("send: \(text.prefix(30))")
 
         // Add user message
         messages.append(Message(role: .user, text: text))
@@ -259,7 +266,12 @@ final class VoiceViewModel {
             )
 
             // Ignore if session already closed
-            guard currentSessionId != nil else { return }
+            guard currentSessionId != nil else {
+                log.warning("session closed!")
+                return
+            }
+
+            log.info("resp: \(answer.prefix(30))")
 
             // Assistant response
             messages.append(Message(role: .assistant, text: answer))
@@ -267,11 +279,17 @@ final class VoiceViewModel {
                 sessionStore.appendMessage(sessionId: sid, message: .init(role: .assistant, text: answer))
             }
 
-            // TTS playback (mic stays open → barge-in possible)
+            // TTS playback + restart mic for wake word barge-in
             status = .speaking
             tts.speak(answer)
+            do {
+                try speech.startListening()
+            } catch {
+                log.error("mic restart during TTS: \(error)")
+            }
         } catch {
             guard currentSessionId != nil else { return }
+            log.error("ERR: \(error.localizedDescription.prefix(50))")
             self.error = error.localizedDescription
             isProcessing = false
             if relayState == .paired {
@@ -326,31 +344,38 @@ final class VoiceViewModel {
     // MARK: - Listening
 
     func startListening() {
-        print("[VoiceVM] startListening called, isConfigured=\(isConfigured), openAIKey=\(openAIKey.isEmpty ? "empty" : "set")")
+        log.info("startListening called, isConfigured=\(self.isConfigured), openAIKey=\(self.openAIKey.isEmpty ? "empty" : "set")")
+        debugLog = "startListening..."
         guard isConfigured else {
             error = "Scan QR code to pair"
+            debugLog = "not configured"
             return
         }
         guard !openAIKey.isEmpty else {
             error = "Enter OpenAI API key in Settings"
+            debugLog = "no API key"
             return
         }
 
         Task {
             let permitted = await speech.requestPermission()
-            print("[VoiceVM] mic permission: \(permitted)")
+            log.info("mic permission: \(permitted)")
             guard permitted else {
                 self.error = "Microphone permission required"
+                debugLog = "no mic perm"
                 return
             }
             do {
+                debugLog = "starting engine..."
                 try speech.startListening()
                 status = .listening
                 error = nil
                 recognizedText = ""
                 isActivated = false
+                debugLog = "listening ok"
             } catch {
                 self.error = "Failed to start recording: \(error.localizedDescription)"
+                debugLog = "engine err: \(error.localizedDescription.prefix(40))"
             }
         }
     }
@@ -390,7 +415,7 @@ final class VoiceViewModel {
                 try await relay.connect(with: info)
                 error = nil
             } catch {
-                print("[VoiceVM] Relay connection failed: \(error)")
+                log.error("Relay connection failed: \(error)")
                 self.error = "Relay connection failed: \(error)"
             }
         }
@@ -406,7 +431,7 @@ final class VoiceViewModel {
                 try await relay.connect(with: info)
                 error = nil
             } catch {
-                print("[VoiceVM] Relay connection failed: \(error)")
+                log.error("Relay connection failed: \(error)")
                 self.error = "Relay connection failed: \(error)"
             }
         }
