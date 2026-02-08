@@ -15,7 +15,7 @@ final class SpeechService: @unchecked Sendable {
     private var isSpeaking = false
     private var recordingSampleRate: Double = 16000
 
-    var silenceTimeout: TimeInterval = 1.5
+    var silenceTimeout: TimeInterval = 3.0
     var sttLanguage: String = "en"
     var speakerMode: Bool = false
 
@@ -242,7 +242,7 @@ final class SpeechService: @unchecked Sendable {
                         self.onTriggerDetected?()
                         // Activation timeout: return to passive if no speech
                         self.activationTimer?.invalidate()
-                        self.activationTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
+                        self.activationTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
                             guard let self, self.isActivated else { return }
                             log.info("Activation timeout, back to passive")
                             self.isActivated = false
@@ -386,6 +386,34 @@ final class SpeechService: @unchecked Sendable {
         }
     }
 
+    /// Reset active mode state for retry — keeps isActivated true, restarts activation timer
+    private func resetActiveState() {
+        isSpeaking = false
+        speechStartTime = nil
+        peakDB = -100
+        bufferLock.lock()
+        audioBuffer.removeAll()
+        bufferLock.unlock()
+
+        // Restart activation timer so it eventually times out
+        activationTimer?.invalidate()
+        activationTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            guard let self, self.isActivated else { return }
+            log.info("Activation timeout after retry, back to passive")
+            self.isActivated = false
+            self.isSpeaking = false
+            self.peakDB = -100
+            self.bufferLock.lock()
+            self.audioBuffer.removeAll()
+            self.bufferLock.unlock()
+            self.startPassiveRecognition()
+            DispatchQueue.main.async {
+                self.onDebugLog?("timeout → passive")
+                self.onActivationTimeout?()
+            }
+        }
+    }
+
     private func resetSilenceTimer() {
         let timeout = silenceTimeout
         DispatchQueue.main.async { [weak self] in
@@ -448,12 +476,7 @@ final class SpeechService: @unchecked Sendable {
                 guard !trimmed.isEmpty else {
                     DispatchQueue.main.async {
                         self.onDebugLog?("whisper: empty, retry...")
-                        // Stay in active mode — reset and wait for real speech
-                        self.isSpeaking = false
-                        self.speechStartTime = nil
-                        self.bufferLock.lock()
-                        self.audioBuffer.removeAll()
-                        self.bufferLock.unlock()
+                        self.resetActiveState()
                     }
                     return
                 }
@@ -465,12 +488,7 @@ final class SpeechService: @unchecked Sendable {
                     log.info("Hallucination filter: \"\(trimmed)\" → skip")
                     DispatchQueue.main.async {
                         self.onDebugLog?("whisper: hallucination, retry...")
-                        // Stay in active mode
-                        self.isSpeaking = false
-                        self.speechStartTime = nil
-                        self.bufferLock.lock()
-                        self.audioBuffer.removeAll()
-                        self.bufferLock.unlock()
+                        self.resetActiveState()
                     }
                     return
                 }
