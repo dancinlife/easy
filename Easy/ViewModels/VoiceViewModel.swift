@@ -66,10 +66,6 @@ final class VoiceViewModel {
             UserDefaults.standard.set(silenceTimeout, forKey: "silenceTimeout")
         }
     }
-    var autoListen: Bool {
-        get { UserDefaults.standard.object(forKey: "autoListen") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "autoListen") }
-    }
     var sttLanguage: String {
         get { UserDefaults.standard.string(forKey: "sttLanguage") ?? "en" }
         set {

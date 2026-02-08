@@ -109,7 +109,7 @@ struct SettingsView: View {
                             .foregroundStyle(.orange)
                     }
                 } header: {
-                    Text("API Key")
+                    Text("OpenAI API Key")
                 } footer: {
                     Text("Used for both speech recognition (Whisper) and text-to-speech.")
                 }
@@ -150,11 +150,8 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
 
-                    Toggle("Auto Listen", isOn: $vm.autoListen)
                 } header: {
                     Text("TTS")
-                } footer: {
-                    Text("Automatically restarts voice recognition after TTS playback.")
                 }
 
                 Section("Appearance") {
