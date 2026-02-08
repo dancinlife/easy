@@ -89,13 +89,6 @@ final class SessionStore {
     func appendMessage(sessionId: String, message: Session.SessionMessage) {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         sessions[idx].messages.append(message)
-
-        // Update session name with latest user message
-        if message.role == .user {
-            let name = String(message.text.prefix(30))
-            if !name.isEmpty { sessions[idx].name = name }
-        }
-
         save()
     }
 }

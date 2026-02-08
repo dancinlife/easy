@@ -48,6 +48,7 @@ actor RelayService {
 
     nonisolated(unsafe) var onServerInfo: (@Sendable (ServerInfo) -> Void)?
     nonisolated(unsafe) var onStateChanged: (@Sendable (ConnectionState) -> Void)?
+    nonisolated(unsafe) var onSessionEnd: (@Sendable (String) -> Void)?
     private(set) var state: ConnectionState = .disconnected {
         didSet {
             let callback = onStateChanged
@@ -96,8 +97,21 @@ actor RelayService {
         try await performKeyExchange(serverPublicKey: info.serverPublicKey)
 
         guard connectionId == myConnectionId else { return }
-        state = .paired
-        log.notice("Pairing complete")
+
+        // Wait for key_exchange_ack (set by handlePayload)
+        for i in 0..<20 {
+            try await Task.sleep(for: .milliseconds(500))
+            guard connectionId == myConnectionId else { return }
+            if state == .paired {
+                log.notice("Pairing complete (took \(i * 500)ms)")
+                break
+            }
+        }
+
+        if state != .paired {
+            log.warning("Key exchange ack timeout (10s) — server not responding")
+            state = .disconnected
+        }
     }
 
     func disconnect() {

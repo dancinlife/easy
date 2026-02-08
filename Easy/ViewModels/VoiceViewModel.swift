@@ -94,9 +94,8 @@ final class VoiceViewModel {
     }
 
     // Theme
-    var theme: String {
-        get { UserDefaults.standard.string(forKey: "theme") ?? "system" }
-        set { UserDefaults.standard.set(newValue, forKey: "theme") }
+    var theme: String = UserDefaults.standard.string(forKey: "theme") ?? "system" {
+        didSet { UserDefaults.standard.set(theme, forKey: "theme") }
     }
 
     var preferredColorScheme: ColorScheme? {
@@ -212,12 +211,18 @@ final class VoiceViewModel {
         relay.onServerInfo = { [weak self] info in
             Task { @MainActor in
                 guard let self, let sid = self.currentSessionId,
-                      var session = self.sessionStore.sessions.first(where: { $0.id == sid }) else { return }
-                session.workDir = info.workDir
+                      var session = self.sessionStore.sessions.first(where: { $0.id == sid }) else {
+                    log.warning("server_info ignored: no session")
+                    return
+                }
                 session.hostname = info.hostname
-                if session.name == "New Session" {
-                    let basename = (info.workDir as NSString).lastPathComponent
-                    if !basename.isEmpty { session.name = basename }
+                let newWorkDir = (info.workDir as NSString).expandingTildeInPath
+                session.workDir = newWorkDir
+                let basename = (newWorkDir as NSString).lastPathComponent
+                log.info("server_info: workDir=\(info.workDir) → basename=\(basename)")
+                self.debugLog = "workDir: \(info.workDir)"
+                if !basename.isEmpty {
+                    session.name = basename
                 }
                 self.sessionStore.updateSession(session)
             }

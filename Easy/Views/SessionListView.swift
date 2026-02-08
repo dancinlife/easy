@@ -25,11 +25,14 @@ struct SessionListView: View {
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
 
+                            if let lastMsg = session.messages.last {
+                                Text(lastMsg.text)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+
                             HStack(spacing: 6) {
-                                if let workDir = session.workDir {
-                                    Text("~/\((workDir as NSString).lastPathComponent)")
-                                    Text("\u{00B7}")
-                                }
                                 Text(session.createdAt.formatted(.relative(presentation: .named)))
                                 Text("\u{00B7}")
                                 Text("\(session.messages.count) msgs")

@@ -188,6 +188,7 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+        .preferredColorScheme(vm.preferredColorScheme)
         }
     }
 
