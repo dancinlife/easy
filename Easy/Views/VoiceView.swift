@@ -34,104 +34,13 @@ struct VoiceView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 6) {
-                    Divider()
-
-                    // Status text
-                    statusText
-                        .padding(.horizontal, 16)
-
-                    // Debug
-                    if !vm.debugLog.isEmpty {
-                        Text(vm.debugLog)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.gray)
-                            .padding(.horizontal, 16)
-                    }
-
-                    // Error
-                    if let error = vm.error {
-                        Text(error)
-                            .font(.caption2)
-                            .foregroundStyle(.red)
-                            .padding(.horizontal, 16)
-                    }
-
-                    // Controls
-                    HStack {
-                        Button(action: { vm.stopAll() }) {
-                            Image(systemName: "stop.fill")
-                                .font(.body)
-                                .foregroundStyle(.red)
-                                .frame(width: 44, height: 44)
-                        }
-                        .opacity(vm.status != .idle ? 1 : 0.3)
-                        .disabled(vm.status == .idle)
-
-                        Spacer()
-
-                        // Mic button with pulse animation
-                        Button(action: { vm.startListening() }) {
-                            ZStack {
-                                // Pulse rings
-                                if vm.status == .listening {
-                                    Circle()
-                                        .stroke(micColor.opacity(0.3), lineWidth: 2)
-                                        .frame(width: 72, height: 72)
-                                        .scaleEffect(isPulsing ? 1.3 : 1.0)
-                                        .opacity(isPulsing ? 0 : 0.8)
-
-                                    Circle()
-                                        .stroke(micColor.opacity(0.2), lineWidth: 2)
-                                        .frame(width: 72, height: 72)
-                                        .scaleEffect(isPulsing ? 1.6 : 1.0)
-                                        .opacity(isPulsing ? 0 : 0.5)
-                                }
-
-                                Circle()
-                                    .fill(micColor)
-                                    .frame(width: 56, height: 56)
-
-                                Image(systemName: micIcon)
-                                    .font(.title3)
-                                    .foregroundStyle(.white)
-                                    .symbolEffect(.variableColor.iterative, isActive: vm.status == .thinking)
-                            }
-                        }
-                        .disabled(vm.status == .thinking || vm.status == .speaking)
-
-                        Spacer()
-
-                        // Speaker mode toggle
-                        Button {
-                            vm.speakerMode.toggle()
-                        } label: {
-                            Image(systemName: vm.speakerMode ? "speaker.wave.3.fill" : "speaker.wave.1")
-                                .font(.body)
-                                .foregroundStyle(vm.speakerMode ? .orange : .secondary)
-                                .frame(width: 44, height: 44)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                }
-                .padding(.bottom, 8)
-                .background(.bar)
+                bottomBar
             }
         }
         .navigationTitle(currentSessionName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.visible, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Text(statusLabel)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(statusLabelColor)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(statusLabelColor.opacity(0.15))
-                    .clipShape(Capsule())
-            }
-        }
+        .toolbar { toolbarItems }
         .onAppear {
             if vm.status == .idle && vm.relayState == .paired {
                 vm.startListening()
@@ -206,6 +115,108 @@ struct VoiceView: View {
             }
             .foregroundStyle(.purple)
         }
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 6) {
+            Divider()
+
+            statusText
+                .padding(.horizontal, 16)
+
+            if !vm.debugLog.isEmpty {
+                Text(vm.debugLog)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.gray)
+                    .padding(.horizontal, 16)
+            }
+
+            if let error = vm.error {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+            }
+
+            HStack {
+                Button(action: { vm.stopAll() }) {
+                    Image(systemName: "stop.fill")
+                        .font(.body)
+                        .foregroundStyle(.red)
+                        .frame(width: 44, height: 44)
+                }
+                .opacity(vm.status != .idle ? 1 : 0.3)
+                .disabled(vm.status == .idle)
+
+                Spacer()
+
+                Button(action: { vm.startListening() }) {
+                    ZStack {
+                        if vm.status == .listening {
+                            Circle()
+                                .stroke(micColor.opacity(0.3), lineWidth: 2)
+                                .frame(width: 72, height: 72)
+                                .scaleEffect(isPulsing ? 1.3 : 1.0)
+                                .opacity(isPulsing ? 0 : 0.8)
+
+                            Circle()
+                                .stroke(micColor.opacity(0.2), lineWidth: 2)
+                                .frame(width: 72, height: 72)
+                                .scaleEffect(isPulsing ? 1.6 : 1.0)
+                                .opacity(isPulsing ? 0 : 0.5)
+                        }
+
+                        Circle()
+                            .fill(micColor)
+                            .frame(width: 56, height: 56)
+
+                        Image(systemName: micIcon)
+                            .font(.title3)
+                            .foregroundStyle(.white)
+                            .symbolEffect(.variableColor.iterative, isActive: vm.status == .thinking)
+                    }
+                }
+                .disabled(vm.status == .thinking || vm.status == .speaking)
+
+                Spacer()
+
+                Button {
+                    vm.speakerMode.toggle()
+                } label: {
+                    Image(systemName: vm.speakerMode ? "speaker.wave.3.fill" : "speaker.wave.1")
+                        .font(.body)
+                        .foregroundStyle(vm.speakerMode ? .orange : .secondary)
+                        .frame(width: 44, height: 44)
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+        .padding(.bottom, 8)
+        .background(.bar)
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarItems: some ToolbarContent {
+        if #available(iOS 26.0, *) {
+            ToolbarItem(placement: .topBarTrailing) {
+                statusBadge
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .topBarTrailing) {
+                statusBadge
+            }
+        }
+    }
+
+    private var statusBadge: some View {
+        Text(statusLabel)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(statusLabelColor)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(statusLabelColor.opacity(0.15)))
     }
 
     private var currentSessionName: String {
