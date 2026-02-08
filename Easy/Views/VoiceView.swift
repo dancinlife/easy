@@ -139,6 +139,8 @@ struct VoiceView: View {
             }
 
             HStack {
+                Spacer()
+
                 Button(action: { vm.stopAll() }) {
                     Image(systemName: "stop.fill")
                         .font(.body)
@@ -188,6 +190,8 @@ struct VoiceView: View {
                         .foregroundStyle(vm.speakerMode ? .orange : .secondary)
                         .frame(width: 44, height: 44)
                 }
+
+                Spacer()
             }
             .padding(.horizontal, 12)
         }
