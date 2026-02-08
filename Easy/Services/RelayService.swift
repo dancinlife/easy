@@ -268,14 +268,17 @@ actor RelayService {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else { return }
 
+        print("[RelayService] 수신: type=\(type) payload.type=\((json["payload"] as? [String: Any])?["type"] as? String ?? "N/A")")
+
         switch type {
         case "joined":
             state = .connected
         case "peer_joined":
             break
         case "peer_left":
+            print("[RelayService] peer_left — 서버 연결 끊김")
             sessionKey = nil
-            state = .connected
+            state = .disconnected
         case "message":
             guard let payload = json["payload"] as? [String: Any] else { return }
             handlePayload(payload)
@@ -319,9 +322,11 @@ actor RelayService {
             state = .disconnected
 
         case "text_answer":
+            print("[RelayService] text_answer 수신, sessionKey=\(sessionKey != nil), continuation=\(pendingTextContinuation != nil)")
             guard let sessionKey,
                   let encryptedBase64 = payload["encrypted"] as? String,
                   let encryptedData = Data(base64URLEncoded: encryptedBase64) else {
+                print("[RelayService] text_answer guard 실패")
                 pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                 pendingTextContinuation = nil
                 return
@@ -333,14 +338,17 @@ actor RelayService {
 
                 guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
                       let answer = json["answer"] as? String else {
+                    print("[RelayService] text_answer JSON 파싱 실패")
                     pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                     pendingTextContinuation = nil
                     return
                 }
 
+                print("[RelayService] text_answer 복호화 성공: \(answer.prefix(50))")
                 pendingTextContinuation?.resume(returning: answer.trimmingCharacters(in: .whitespacesAndNewlines))
                 pendingTextContinuation = nil
             } catch {
+                print("[RelayService] text_answer 복호화 실패: \(error)")
                 pendingTextContinuation?.resume(throwing: RelayError.decryptionFailed)
                 pendingTextContinuation = nil
             }

@@ -120,12 +120,16 @@ final class VoiceViewModel {
             }
         }
 
-        // TTS 완료 → 큐 확인 또는 계속 듣기 (mcp-voice-hooks: auto-wait)
+        // TTS 완료 → 큐 확인 또는 다시 듣기
         tts.onFinished = { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
-                self.status = .listening
-                self.processNextUtterance()
+                guard let self, self.currentSessionId != nil else { return }
+                self.isProcessing = false
+                if self.pendingUtterances.isEmpty {
+                    self.startListening()
+                } else {
+                    self.processNextUtterance()
+                }
             }
         }
 
@@ -145,7 +149,11 @@ final class VoiceViewModel {
 
         relay.onStateChanged = { [weak self] newState in
             Task { @MainActor in
-                self?.relayState = newState
+                guard let self else { return }
+                self.relayState = newState
+                if newState == .disconnected {
+                    self.stopAll()
+                }
             }
         }
 
@@ -203,13 +211,12 @@ final class VoiceViewModel {
 
         Task {
             await sendToServer(text)
-            // 처리 완료 후 큐에 남은 것 확인
-            processNextUtterance()
         }
     }
 
     private func sendToServer(_ text: String) async {
         ensureSession()
+        speech.stopListening()
         status = .thinking
         recognizedText = text
 
@@ -240,8 +247,12 @@ final class VoiceViewModel {
         } catch {
             guard currentSessionId != nil else { return }
             self.error = error.localizedDescription
-            status = .listening
             isProcessing = false
+            if relayState == .paired {
+                startListening()
+            } else {
+                status = .idle
+            }
         }
     }
 

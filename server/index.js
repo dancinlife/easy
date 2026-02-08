@@ -183,13 +183,12 @@ function _runClaudeOnce(question, sessionId) {
     const args = ["--print"];
     if (sessionId) {
       if (activeSessions.has(sessionId)) {
-        // 이미 생성된 세션 → --resume으로 재개
         args.push("--resume", sessionId);
       } else {
-        // 새 세션 → --session-id로 생성
         args.push("--session-id", sessionId);
       }
     }
+    args.push("--append-system-prompt", "You are being used via a voice interface (TTS). Keep responses concise and conversational. No markdown, no code blocks, no bullet points. Speak naturally as if talking to a developer. When explaining code changes, describe what you did briefly instead of showing code.");
     args.push(question);
 
     console.log(`[Claude] claude ${args.join(" ").slice(0, 100)}`);
