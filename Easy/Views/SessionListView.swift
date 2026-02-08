@@ -13,23 +13,39 @@ struct SessionListView: View {
                     vm.switchSession(id: session.id)
                     path.append(session.id)
                 } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(session.name)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
+                    HStack(spacing: 10) {
+                        // 연결 상태 dot
+                        Circle()
+                            .fill(sessionDotColor(session))
+                            .frame(width: 8, height: 8)
 
-                        HStack(spacing: 6) {
-                            if let workDir = session.workDir {
-                                Text("~/\((workDir as NSString).lastPathComponent)")
-                                Text("\u{00B7}")
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(session.name)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+
+                                if let hostname = session.hostname {
+                                    Text(hostname.replacingOccurrences(of: ".local", with: ""))
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                }
                             }
-                            Text(session.createdAt.formatted(.relative(presentation: .named)))
-                            Text("\u{00B7}")
-                            Text("\(session.messages.count)개 메시지")
+
+                            HStack(spacing: 6) {
+                                if let workDir = session.workDir {
+                                    Text("~/\((workDir as NSString).lastPathComponent)")
+                                    Text("\u{00B7}")
+                                }
+                                Text(session.createdAt.formatted(.relative(presentation: .named)))
+                                Text("\u{00B7}")
+                                Text("\(session.messages.count)개 메시지")
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -54,23 +70,13 @@ struct SessionListView: View {
         .navigationTitle("Easy")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(relayDotColor)
-                        .frame(width: 8, height: 8)
-                    Text(relayStatusLabel)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
             ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 12) {
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gearshape")
-                    }
                     Button { showQRScanner = true } label: {
                         Image(systemName: "qrcode.viewfinder")
+                    }
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gearshape")
                     }
                 }
             }
@@ -86,21 +92,16 @@ struct SessionListView: View {
         }
     }
 
-    private var relayDotColor: Color {
-        switch vm.relayState {
-        case .disconnected: .red
-        case .connecting: .orange
-        case .connected: .yellow
-        case .paired: .green
+    private func sessionDotColor(_ session: Session) -> Color {
+        guard let room = session.room,
+              room == vm.pairedRoom else {
+            return .gray
         }
-    }
-
-    private var relayStatusLabel: String {
         switch vm.relayState {
-        case .disconnected: "연결 안됨"
-        case .connecting: "연결 중..."
-        case .connected: "연결됨"
-        case .paired: "E2E 암호화"
+        case .disconnected: return .red
+        case .connecting: return .orange
+        case .connected: return .yellow
+        case .paired: return .green
         }
     }
 }

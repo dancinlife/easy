@@ -19,8 +19,10 @@ struct VoiceView: View {
                 }
                 .defaultScrollAnchor(.bottom)
                 .onAppear {
-                    if let last = vm.messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        if let last = vm.messages.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
                     }
                 }
                 .onChange(of: vm.messages.count) {
@@ -102,9 +104,10 @@ struct VoiceView: View {
                     .frame(width: 44, height: 44)
                 }
                 .padding(.horizontal, 12)
-                .padding(.bottom, 4)
             }
+            .padding(.bottom, 8)
             .background(.bar)
+            .padding(.bottom, 1) // safe area 여백 확보
         }
         .navigationTitle(currentSessionName)
         .navigationBarTitleDisplayMode(.inline)

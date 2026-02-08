@@ -90,10 +90,10 @@ final class SessionStore {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         sessions[idx].messages.append(message)
 
-        // 첫 번째 유저 메시지로 세션 이름 자동 생성
-        if sessions[idx].name == "새 세션" && message.role == .user {
+        // 최근 유저 메시지로 세션 이름 업데이트
+        if message.role == .user {
             let name = String(message.text.prefix(30))
-            sessions[idx].name = name.isEmpty ? "새 세션" : name
+            if !name.isEmpty { sessions[idx].name = name }
         }
 
         save()

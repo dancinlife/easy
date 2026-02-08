@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Black background -->
+  <rect width="1024" height="1024" fill="#000000"/>
+
+  <!-- Spacebar shape: |_______| -->
+  <path d="M 312 480 L 312 580 L 712 580 L 712 480"
+        fill="none"
+        stroke="#ffffff"
+        stroke-width="48"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+</svg>
