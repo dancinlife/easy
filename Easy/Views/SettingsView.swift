@@ -78,6 +78,12 @@ struct SettingsView: View {
                         Text("Shimmer").tag("shimmer")
                     }
 
+                    Picker("Speed", selection: $vm.ttsSpeed) {
+                        Text("Normal").tag(1.0)
+                        Text("Fast").tag(1.5)
+                        Text("Very Fast").tag(2.0)
+                    }
+
                     Toggle("Auto Listen", isOn: $vm.autoListen)
                 } header: {
                     Text("TTS")

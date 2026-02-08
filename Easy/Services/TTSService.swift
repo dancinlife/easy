@@ -15,6 +15,7 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
 
     var apiKey: String?
     var voice: String = "nova"
+    var speed: Double = 1.0
 
     func speak(_ text: String) {
         stop()
@@ -60,6 +61,7 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
             "model": "gpt-4o-mini-tts",
             "input": text,
             "voice": voice,
+            "speed": speed,
             "instructions": "Speak naturally in the same language as the input text.",
             "response_format": "mp3"
         ]

@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.ghost.easy", category: "whisper")
 
 actor WhisperService {
     private var apiKey: String?
@@ -28,6 +31,10 @@ actor WhisperService {
         body.appendMultipart(boundary: boundary, name: "model", value: "whisper-1")
         // language
         body.appendMultipart(boundary: boundary, name: "language", value: language)
+        // temperature 0 = deterministic, reduces hallucination
+        body.appendMultipart(boundary: boundary, name: "temperature", value: "0")
+        // verbose_json to get no_speech_prob
+        body.appendMultipart(boundary: boundary, name: "response_format", value: "verbose_json")
         // prompt — dev context hint
         body.appendMultipart(boundary: boundary, name: "prompt", value: "Software development using Claude Code.")
 
@@ -45,7 +52,31 @@ actor WhisperService {
             throw WhisperError.apiError(statusCode: http.statusCode, message: errorText)
         }
 
-        let result = try JSONDecoder().decode(WhisperResponse.self, from: data)
+        let result = try JSONDecoder().decode(VerboseWhisperResponse.self, from: data)
+
+        // Filter noise using segment-level metrics
+        if let seg = result.segments?.first {
+            log.info("Whisper: \"\(result.text)\" no_speech=\(String(format: "%.2f", seg.no_speech_prob)) logprob=\(String(format: "%.2f", seg.avg_logprob)) compress=\(String(format: "%.1f", seg.compression_ratio))")
+
+            // High no_speech_prob = likely not real speech (threshold per OpenAI paper: 0.6)
+            if seg.no_speech_prob > 0.6 {
+                log.info("skip: no_speech_prob \(String(format: "%.2f", seg.no_speech_prob))")
+                return ""
+            }
+            // Very low avg_logprob = poor recognition quality
+            if seg.avg_logprob < -1.0 {
+                log.info("skip: avg_logprob \(String(format: "%.2f", seg.avg_logprob))")
+                return ""
+            }
+            // High compression ratio = repetitive hallucination
+            if seg.compression_ratio > 2.4 {
+                log.info("skip: compression_ratio \(String(format: "%.1f", seg.compression_ratio))")
+                return ""
+            }
+        } else {
+            log.info("Whisper: \"\(result.text)\" (no segments)")
+        }
+
         return result.text
     }
 
@@ -63,8 +94,15 @@ actor WhisperService {
         }
     }
 
-    private struct WhisperResponse: Decodable {
+    private struct VerboseWhisperResponse: Decodable {
         let text: String
+        let segments: [Segment]?
+
+        struct Segment: Decodable {
+            let no_speech_prob: Double
+            let avg_logprob: Double
+            let compression_ratio: Double
+        }
     }
 }
 

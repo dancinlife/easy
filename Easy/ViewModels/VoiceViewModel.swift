@@ -80,6 +80,13 @@ final class VoiceViewModel {
             tts.voice = newValue
         }
     }
+    var ttsSpeed: Double {
+        get { UserDefaults.standard.object(forKey: "ttsSpeed") as? Double ?? 1.0 }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "ttsSpeed")
+            tts.speed = newValue
+        }
+    }
 
     // Services
     let speech = SpeechService()
@@ -110,6 +117,7 @@ final class VoiceViewModel {
         Task { await whisper.setAPIKey(openAIKey) }
         tts.apiKey = openAIKey.isEmpty ? nil : openAIKey
         tts.voice = ttsVoice
+        tts.speed = ttsSpeed
 
         // Wake word debug (shows which word triggered)
         speech.onDebugLog = { [weak self] text in

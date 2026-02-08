@@ -212,13 +212,15 @@ final class SpeechService: @unchecked Sendable {
             self.callbackCounter += 1
 
             if let result {
+                let segments = result.bestTranscription.segments
                 let text = result.bestTranscription.formattedString
                 let lower = text.lowercased()
-                log.debug("SFSpeech partial: \"\(text)\"")
-                DispatchQueue.main.async { self.onDebugLog?("heard: \(lower)") }
+                let lastConf = segments.last?.confidence ?? 0
+                log.debug("SFSpeech partial: \"\(text)\" conf=\(lastConf)")
+                DispatchQueue.main.async { self.onDebugLog?("heard: \(lower) (\(Int(lastConf * 100))%)") }
 
-                if self.containsTrigger(lower) {
-                    log.notice("Wake word detected! \"\(text)\"")
+                if self.containsTrigger(lower, segments: segments) {
+                    log.notice("Wake word detected! \"\(text)\" conf=\(lastConf)")
                     self.stopPassiveRecognition()
                     self.isActivated = true
                     DispatchQueue.main.async {
@@ -506,7 +508,17 @@ final class SpeechService: @unchecked Sendable {
         "eating", "is it", "ej",
     ]
 
-    private func containsTrigger(_ text: String) -> Bool {
+    private let minTriggerConfidence: Float = 0.3
+
+    private func containsTrigger(_ text: String, segments: [SFTranscriptionSegment]) -> Bool {
+        // Check confidence — low confidence means noise (keyboard, etc.)
+        // Use the last segment's confidence as proxy
+        let conf = segments.last?.confidence ?? 0
+        if conf > 0 && conf < minTriggerConfidence {
+            log.debug("Trigger skip: conf=\(conf) < \(self.minTriggerConfidence)")
+            return false
+        }
+
         // Multi-word phrase check (e.g. "is it")
         for variant in triggerVariants where variant.contains(" ") {
             if text.contains(variant) { return true }
