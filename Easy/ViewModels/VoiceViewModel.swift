@@ -10,6 +10,11 @@ private let log = Logger(subsystem: "com.ghost.easy", category: "voicevm")
 @Observable
 @MainActor
 final class VoiceViewModel {
+    static let shared = VoiceViewModel()
+
+    // CarPlay
+    var isCarPlayConnected: Bool = false
+
     // State
     var messages: [Message] = []
     var status: Status = .idle

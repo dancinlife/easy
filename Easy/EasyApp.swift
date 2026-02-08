@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct EasyApp: App {
-    @State private var vm = VoiceViewModel()
+    private var vm = VoiceViewModel.shared
     @State private var navigationPath = NavigationPath()
 
     var body: some Scene {
