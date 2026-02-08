@@ -120,12 +120,13 @@ struct SettingsView: View {
                         Text("Korean").tag("ko")
                     }
 
-                    HStack {
-                        Text("Silence Detection")
-                        Slider(value: $vm.silenceTimeout, in: 1.0...3.0, step: 0.5)
-                        Text("\(vm.silenceTimeout, specifier: "%.1f")s")
-                            .monospacedDigit()
-                    }
+                    Stepper(
+                        "Silence \(String(format: "%.1f", vm.silenceTimeout))s",
+                        value: $vm.silenceTimeout,
+                        in: 1.0...5.0,
+                        step: 0.5
+                    )
+                    .monospacedDigit()
                 }
 
                 Section {
@@ -188,8 +189,8 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-        .preferredColorScheme(vm.preferredColorScheme)
         }
+        .preferredColorScheme(vm.preferredColorScheme)
     }
 
     private var maskedKey: String {
