@@ -70,8 +70,8 @@ struct QRScannerView: View {
 struct QRCameraPreview: UIViewRepresentable {
     let onCodeScanned: (String) -> Void
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
+    func makeUIView(context: Context) -> CameraPreviewView {
+        let view = CameraPreviewView()
         let session = AVCaptureSession()
 
         guard let device = AVCaptureDevice.default(for: .video),
@@ -86,20 +86,25 @@ struct QRCameraPreview: UIViewRepresentable {
 
         let previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.frame = UIScreen.main.bounds
         view.layer.addSublayer(previewLayer)
+        view.previewLayer = previewLayer
 
-        context.coordinator.previewLayer = previewLayer
-
-        Task { @MainActor in
+        DispatchQueue.global(qos: .userInitiated).async {
             session.startRunning()
         }
 
         return view
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.previewLayer?.frame = uiView.bounds
+    func updateUIView(_ uiView: CameraPreviewView, context: Context) {}
+
+    class CameraPreviewView: UIView {
+        var previewLayer: AVCaptureVideoPreviewLayer?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            previewLayer?.frame = bounds
+        }
     }
 
     func makeCoordinator() -> Coordinator {

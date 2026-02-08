@@ -163,12 +163,13 @@ function deriveSharedKey(privateKey, peerPublicKeyRaw) {
 // ─── Claude (async spawn, 직렬화) ───
 
 let claudeQueue = Promise.resolve();
+const activeSessions = new Set(); // 이미 생성된 세션 추적
 
 function runClaude(question, sessionId) {
   const job = claudeQueue.then(async () => {
     const result = await _runClaudeOnce(question, sessionId);
     if (result === null && sessionId) {
-      console.log("[Claude] 세션 충돌 — 세션 없이 재시도");
+      console.log("[Claude] 세션 실패 — 세션 없이 재시도");
       return _runClaudeOnce(question, null);
     }
     return result;
@@ -181,7 +182,13 @@ function _runClaudeOnce(question, sessionId) {
   return new Promise((resolve) => {
     const args = ["--print"];
     if (sessionId) {
-      args.push("--session-id", sessionId);
+      if (activeSessions.has(sessionId)) {
+        // 이미 생성된 세션 → --resume으로 재개
+        args.push("--resume", sessionId);
+      } else {
+        // 새 세션 → --session-id로 생성
+        args.push("--session-id", sessionId);
+      }
     }
     args.push(question);
 
@@ -214,10 +221,11 @@ function _runClaudeOnce(question, sessionId) {
       clearTimeout(timer);
       if (code !== 0) {
         console.log(`[claude 오류] exit=${code} stderr=${stderr.slice(0, 200)}`);
+      } else if (sessionId) {
+        activeSessions.add(sessionId);
       }
       const answer = stdout.trim();
-      // 세션 락 해제 대기 (1초)
-      setTimeout(() => resolve(answer || null), 1000);
+      resolve(answer || null);
     });
 
     child.on("error", (err) => {
@@ -429,7 +437,9 @@ class RelayConnector {
       const encryptedData = fromBase64url(payload.encrypted);
       const plainData = aesGcmDecrypt(encryptedData, this.sessionKey);
       const json = JSON.parse(plainData.toString());
-      console.log(`[세션] session_end 수신: sessionId=${json.sessionId || "unknown"}`);
+      const sid = json.sessionId;
+      console.log(`[세션] session_end 수신: sessionId=${sid || "unknown"}`);
+      if (sid) activeSessions.delete(sid);
     } catch (err) {
       console.log(`[오류] session_end 처리 실패: ${err.message}`);
     }

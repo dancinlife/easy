@@ -119,6 +119,11 @@ struct VoiceView: View {
         .onDisappear {
             vm.closeCurrentSession()
         }
+        .onChange(of: vm.relayState) { _, newState in
+            if newState == .paired && vm.status == .idle {
+                vm.startListening()
+            }
+        }
         .onChange(of: vm.status) { _, newStatus in
             withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
                 isPulsing = (newStatus == .listening)

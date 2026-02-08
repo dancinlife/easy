@@ -28,6 +28,8 @@ actor WhisperService {
         body.appendMultipart(boundary: boundary, name: "model", value: "whisper-1")
         // language
         body.appendMultipart(boundary: boundary, name: "language", value: language)
+        // prompt — 개발 용어 컨텍스트 힌트
+        body.appendMultipart(boundary: boundary, name: "prompt", value: "Software development using Claude Code.")
 
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body

@@ -225,6 +225,9 @@ final class VoiceViewModel {
                 sessionId: currentSessionId
             )
 
+            // 세션이 이미 닫혔으면 무시
+            guard currentSessionId != nil else { return }
+
             // 어시스턴트 응답
             messages.append(Message(role: .assistant, text: answer))
             if let sid = currentSessionId {
@@ -235,6 +238,7 @@ final class VoiceViewModel {
             status = .speaking
             tts.speak(answer)
         } catch {
+            guard currentSessionId != nil else { return }
             self.error = error.localizedDescription
             status = .listening
             isProcessing = false
