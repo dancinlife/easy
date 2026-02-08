@@ -3,138 +3,133 @@ import SwiftUI
 struct VoiceView: View {
     @Bindable var vm: VoiceViewModel
     @State private var isPulsing = false
+    @State private var isScrollReady = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Messages
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(vm.messages) { msg in
-                            MessageBubble(message: msg)
-                                .id(msg.id)
-                        }
-                        Color.clear
-                            .frame(height: 1)
-                            .id("bottom")
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(vm.messages) { msg in
+                        MessageBubble(message: msg)
+                            .id(msg.id)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
-                    .padding(.bottom, 80)
+                    Color.clear.frame(height: 0).id("bottom") // VStack spacing(8pt)이 하단 여백
                 }
-                .defaultScrollAnchor(.bottom)
-                .onAppear {
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+            }
+            .defaultScrollAnchor(.bottom)
+            .opacity(isScrollReady ? 1 : 0)
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     proxy.scrollTo("bottom", anchor: .bottom)
+                    isScrollReady = true
                 }
-                .onChange(of: vm.messages.count) {
+            }
+            .onChange(of: vm.messages.count) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     withAnimation {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
                 }
             }
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 6) {
+                    Divider()
 
-            // Bottom bar
-            VStack(spacing: 6) {
-                Divider()
-
-                // Status text
-                statusText
-                    .padding(.horizontal, 16)
-
-                // Debug
-                if !vm.debugLog.isEmpty {
-                    Text(vm.debugLog)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.gray)
+                    // Status text
+                    statusText
                         .padding(.horizontal, 16)
-                }
 
-                // Error
-                if let error = vm.error {
-                    Text(error)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 16)
-                }
-
-                // Controls
-                HStack {
-                    Button(action: { vm.stopAll() }) {
-                        Image(systemName: "stop.fill")
-                            .font(.body)
-                            .foregroundStyle(.red)
-                            .frame(width: 44, height: 44)
+                    // Debug
+                    if !vm.debugLog.isEmpty {
+                        Text(vm.debugLog)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.gray)
+                            .padding(.horizontal, 16)
                     }
-                    .opacity(vm.status != .idle ? 1 : 0.3)
-                    .disabled(vm.status == .idle)
 
-                    Spacer()
+                    // Error
+                    if let error = vm.error {
+                        Text(error)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .padding(.horizontal, 16)
+                    }
 
-                    // Mic button with pulse animation
-                    Button(action: { vm.startListening() }) {
-                        ZStack {
-                            // Pulse rings
-                            if vm.status == .listening {
+                    // Controls
+                    HStack {
+                        Button(action: { vm.stopAll() }) {
+                            Image(systemName: "stop.fill")
+                                .font(.body)
+                                .foregroundStyle(.red)
+                                .frame(width: 44, height: 44)
+                        }
+                        .opacity(vm.status != .idle ? 1 : 0.3)
+                        .disabled(vm.status == .idle)
+
+                        Spacer()
+
+                        // Mic button with pulse animation
+                        Button(action: { vm.startListening() }) {
+                            ZStack {
+                                // Pulse rings
+                                if vm.status == .listening {
+                                    Circle()
+                                        .stroke(micColor.opacity(0.3), lineWidth: 2)
+                                        .frame(width: 72, height: 72)
+                                        .scaleEffect(isPulsing ? 1.3 : 1.0)
+                                        .opacity(isPulsing ? 0 : 0.8)
+
+                                    Circle()
+                                        .stroke(micColor.opacity(0.2), lineWidth: 2)
+                                        .frame(width: 72, height: 72)
+                                        .scaleEffect(isPulsing ? 1.6 : 1.0)
+                                        .opacity(isPulsing ? 0 : 0.5)
+                                }
+
                                 Circle()
-                                    .stroke(micColor.opacity(0.3), lineWidth: 2)
-                                    .frame(width: 72, height: 72)
-                                    .scaleEffect(isPulsing ? 1.3 : 1.0)
-                                    .opacity(isPulsing ? 0 : 0.8)
+                                    .fill(micColor)
+                                    .frame(width: 56, height: 56)
 
-                                Circle()
-                                    .stroke(micColor.opacity(0.2), lineWidth: 2)
-                                    .frame(width: 72, height: 72)
-                                    .scaleEffect(isPulsing ? 1.6 : 1.0)
-                                    .opacity(isPulsing ? 0 : 0.5)
+                                Image(systemName: micIcon)
+                                    .font(.title3)
+                                    .foregroundStyle(.white)
+                                    .symbolEffect(.variableColor.iterative, isActive: vm.status == .thinking)
                             }
+                        }
+                        .disabled(vm.status == .thinking || vm.status == .speaking)
 
-                            Circle()
-                                .fill(micColor)
-                                .frame(width: 56, height: 56)
+                        Spacer()
 
-                            Image(systemName: micIcon)
-                                .font(.title3)
-                                .foregroundStyle(.white)
-                                .symbolEffect(.variableColor.iterative, isActive: vm.status == .thinking)
+                        // Speaker mode toggle
+                        Button {
+                            vm.speakerMode.toggle()
+                        } label: {
+                            Image(systemName: vm.speakerMode ? "speaker.wave.3.fill" : "speaker.wave.1")
+                                .font(.body)
+                                .foregroundStyle(vm.speakerMode ? .orange : .secondary)
+                                .frame(width: 44, height: 44)
                         }
                     }
-                    .disabled(vm.status == .thinking || vm.status == .speaking)
-
-                    Spacer()
-
-                    // Speaker mode toggle
-                    Button {
-                        vm.speakerMode.toggle()
-                    } label: {
-                        Image(systemName: vm.speakerMode ? "speaker.wave.3.fill" : "speaker.wave.1")
-                            .font(.body)
-                            .foregroundStyle(vm.speakerMode ? .orange : .secondary)
-                            .frame(width: 44, height: 44)
-                    }
+                    .padding(.horizontal, 12)
                 }
-                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+                .background(.bar)
             }
-            .padding(.bottom, 8)
-            .background(.bar)
-            .padding(.bottom, 1)
         }
         .navigationTitle(currentSessionName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(statusLabelColor)
-                        .frame(width: 6, height: 6)
-                    Text(statusLabel)
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .foregroundStyle(statusLabelColor)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(statusLabelColor.opacity(0.15))
-                .clipShape(Capsule())
+                Text(statusLabel)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(statusLabelColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(statusLabelColor.opacity(0.15))
+                    .clipShape(Capsule())
             }
         }
         .onAppear {
