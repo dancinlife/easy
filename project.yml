@@ -28,3 +28,22 @@ targets:
         com.apple.security.device.audio-input: true
         com.apple.security.device.camera: true
         com.apple.security.network.client: true
+    dependencies:
+      - target: EasyWidget
+        embed: true
+
+  EasyWidget:
+    type: app-extension
+    platform: iOS
+    productName: EasyWidgetExtension
+    sources:
+      - EasyWidget
+      - path: Easy/Models/EasyActivity.swift
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.ghost.easy.widget
+      INFOPLIST_FILE: EasyWidget/Info.plist
+      CODE_SIGN_STYLE: Automatic
+    entitlements:
+      path: EasyWidget/EasyWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true

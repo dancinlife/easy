@@ -26,6 +26,7 @@ struct EasyApp: App {
                     vm.pendingNavigateToSession = nil
                 }
             }
+            .preferredColorScheme(vm.preferredColorScheme)
         }
     }
 }

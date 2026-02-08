@@ -9,28 +9,26 @@ struct VoiceView: View {
             // Messages
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(vm.messages) { msg in
                             MessageBubble(message: msg)
                                 .id(msg.id)
                         }
+                        Color.clear
+                            .frame(height: 1)
+                            .id("bottom")
                     }
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .padding(.top, 8)
+                    .padding(.bottom, 80)
                 }
                 .defaultScrollAnchor(.bottom)
                 .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        if let last = vm.messages.last {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
+                    proxy.scrollTo("bottom", anchor: .bottom)
                 }
                 .onChange(of: vm.messages.count) {
-                    if let last = vm.messages.last {
-                        withAnimation {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
+                    withAnimation {
+                        proxy.scrollTo("bottom", anchor: .bottom)
                     }
                 }
             }
@@ -104,11 +102,15 @@ struct VoiceView: View {
 
                     Spacer()
 
-                    // Status label
-                    Text(statusLabel)
-                        .font(.system(size: 10))
-                        .foregroundStyle(statusLabelColor)
-                        .frame(width: 44, height: 44)
+                    // Speaker mode toggle
+                    Button {
+                        vm.speakerMode.toggle()
+                    } label: {
+                        Image(systemName: vm.speakerMode ? "speaker.wave.3.fill" : "speaker.wave.1")
+                            .font(.body)
+                            .foregroundStyle(vm.speakerMode ? .orange : .secondary)
+                            .frame(width: 44, height: 44)
+                    }
                 }
                 .padding(.horizontal, 12)
             }
@@ -119,6 +121,22 @@ struct VoiceView: View {
         .navigationTitle(currentSessionName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(statusLabelColor)
+                        .frame(width: 6, height: 6)
+                    Text(statusLabel)
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(statusLabelColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(statusLabelColor.opacity(0.15))
+                .clipShape(Capsule())
+            }
+        }
         .onAppear {
             if vm.status == .idle && vm.relayState == .paired {
                 vm.startListening()

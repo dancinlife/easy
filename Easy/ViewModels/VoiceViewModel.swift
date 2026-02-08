@@ -1,7 +1,9 @@
-import Foundation
+import ActivityKit
 import AVFoundation
-import UIKit
+import Foundation
 import os
+import SwiftUI
+import UIKit
 
 private let log = Logger(subsystem: "com.ghost.easy", category: "voicevm")
 
@@ -19,6 +21,9 @@ final class VoiceViewModel {
     // Utterance Queue (mcp-voice-hooks pattern)
     private var pendingUtterances: [String] = []
     private var isProcessing = false
+
+    // Live Activity
+    private var currentActivity: Activity<EasyActivityAttributes>?
 
     // Session
     let sessionStore = SessionStore()
@@ -88,6 +93,30 @@ final class VoiceViewModel {
         }
     }
 
+    // Theme
+    var theme: String {
+        get { UserDefaults.standard.string(forKey: "theme") ?? "system" }
+        set { UserDefaults.standard.set(newValue, forKey: "theme") }
+    }
+
+    var preferredColorScheme: ColorScheme? {
+        switch theme {
+        case "light": .light
+        case "dark": .dark
+        default: nil
+        }
+    }
+
+    // Speaker mode
+    var speakerMode: Bool {
+        get { UserDefaults.standard.object(forKey: "speakerMode") as? Bool ?? false }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "speakerMode")
+            speech.speakerMode = newValue
+            applySpeakerOverride(newValue)
+        }
+    }
+
     // Services
     let speech = SpeechService()
     var tts = TTSService()
@@ -113,6 +142,7 @@ final class VoiceViewModel {
         loadSessionMessages()
 
         speech.sttLanguage = sttLanguage
+        speech.speakerMode = UserDefaults.standard.object(forKey: "speakerMode") as? Bool ?? false
         speech.whisperService = whisper
         Task { await whisper.setAPIKey(openAIKey) }
         tts.apiKey = openAIKey.isEmpty ? nil : openAIKey
@@ -139,8 +169,12 @@ final class VoiceViewModel {
                 guard let self else { return }
                 if self.status == .speaking {
                     self.tts.stop()
+                    self.isProcessing = false
                 }
                 self.isActivated = true
+                self.status = .listening
+                self.recognizedText = ""
+                self.updateActivity(status: .listening)
                 self.speech.playDing()
             }
         }
@@ -152,10 +186,21 @@ final class VoiceViewModel {
             }
         }
 
+        // Activation timeout → back to passive
+        speech.onActivationTimeout = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isActivated = false
+                self.recognizedText = ""
+            }
+        }
+
         // TTS finished → check queue or resume listening
         tts.onFinished = { [weak self] in
             Task { @MainActor in
                 guard let self, self.currentSessionId != nil else { return }
+                // Skip if barge-in already took over
+                guard !self.isActivated else { return }
                 self.isProcessing = false
                 if self.pendingUtterances.isEmpty {
                     self.startListening()
@@ -193,21 +238,6 @@ final class VoiceViewModel {
                         self.messages = []
                     }
                 }
-            }
-        }
-
-        // Stop audio when entering background
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.didEnterBackgroundNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            self.speech.stopListening()
-            self.tts.stop()
-            self.pendingUtterances.removeAll()
-            self.isProcessing = false
-            if self.status != .idle {
-                self.status = .idle
             }
         }
 
@@ -259,6 +289,7 @@ final class VoiceViewModel {
         speech.stopListening()
         status = .thinking
         recognizedText = text
+        updateActivity(status: .thinking, text: text)
         log.info("send: \(text.prefix(30))")
 
         // Add user message
@@ -289,6 +320,7 @@ final class VoiceViewModel {
 
             // TTS playback + restart mic for wake word barge-in
             status = .speaking
+            updateActivity(status: .speaking, text: String(answer.prefix(100)))
             tts.speak(answer)
             do {
                 try speech.startListening()
@@ -304,6 +336,7 @@ final class VoiceViewModel {
                 startListening()
             } else {
                 status = .idle
+                endActivity()
             }
         }
     }
@@ -381,6 +414,11 @@ final class VoiceViewModel {
                 recognizedText = ""
                 isActivated = false
                 debugLog = "listening ok"
+                if currentActivity == nil {
+                    startActivity()
+                } else {
+                    updateActivity(status: .listening)
+                }
             } catch {
                 self.error = "Failed to start recording: \(error.localizedDescription)"
                 debugLog = "engine err: \(error.localizedDescription.prefix(40))"
@@ -394,12 +432,68 @@ final class VoiceViewModel {
         pendingUtterances.removeAll()
         isProcessing = false
         status = .idle
+        endActivity()
+    }
+
+    // MARK: - Speaker Mode
+
+    private func applySpeakerOverride(_ on: Bool) {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.overrideOutputAudioPort(on ? .speaker : .none)
+        } catch {
+            log.error("Speaker override failed: \(error)")
+        }
+    }
+
+    // MARK: - Live Activity
+
+    private func startActivity() {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+
+        let sessionName: String
+        if let sid = currentSessionId,
+           let session = sessionStore.sessions.first(where: { $0.id == sid }) {
+            sessionName = session.name
+        } else {
+            sessionName = "Easy"
+        }
+
+        let attributes = EasyActivityAttributes(sessionName: sessionName)
+        let state = EasyActivityAttributes.ContentState(status: .listening, recognizedText: "")
+
+        do {
+            currentActivity = try Activity.request(
+                attributes: attributes,
+                content: .init(state: state, staleDate: nil)
+            )
+        } catch {
+            log.error("Live Activity start failed: \(error)")
+        }
+    }
+
+    private func updateActivity(status activityStatus: EasyActivityAttributes.ContentState.Status, text: String = "") {
+        guard let activity = currentActivity else { return }
+        let state = EasyActivityAttributes.ContentState(status: activityStatus, recognizedText: text)
+        Task {
+            await activity.update(.init(state: state, staleDate: nil))
+        }
+    }
+
+    private func endActivity() {
+        guard let activity = currentActivity else { return }
+        let finalState = EasyActivityAttributes.ContentState(status: .listening, recognizedText: "")
+        Task {
+            await activity.end(.init(state: finalState, staleDate: nil), dismissalPolicy: .immediate)
+        }
+        currentActivity = nil
     }
 
     // MARK: - Relay
 
     func closeCurrentSession() {
         guard let id = currentSessionId else { return }
+        endActivity()
         stopAll()
         Task { await relay.sendSessionEnd(sessionId: id) }
         sessionStore.deleteSession(id: id)

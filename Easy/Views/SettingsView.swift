@@ -83,12 +83,22 @@ struct SettingsView: View {
                         Text("Fast").tag(1.5)
                         Text("Very Fast").tag(2.0)
                     }
+                    .pickerStyle(.segmented)
 
                     Toggle("Auto Listen", isOn: $vm.autoListen)
                 } header: {
                     Text("TTS")
                 } footer: {
                     Text("Automatically restarts voice recognition after TTS playback.")
+                }
+
+                Section("Appearance") {
+                    Picker("Theme", selection: $vm.theme) {
+                        Text("System").tag("system")
+                        Text("Light").tag("light")
+                        Text("Dark").tag("dark")
+                    }
+                    .pickerStyle(.segmented)
                 }
 
                 Section("Info") {

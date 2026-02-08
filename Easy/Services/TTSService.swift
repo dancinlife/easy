@@ -79,10 +79,6 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
     }
 
     private func playAudio(_ data: Data) throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-        try session.setActive(true)
-
         audioPlayer = try AVAudioPlayer(data: data)
         audioPlayer?.delegate = self
         audioPlayer?.play()
@@ -90,9 +86,6 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
 
     // AVAudioPlayerDelegate
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-
         Task { @MainActor in
             self.audioPlayer = nil
             self.isSpeaking = false

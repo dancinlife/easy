@@ -17,6 +17,7 @@ final class SpeechService: @unchecked Sendable {
 
     var silenceTimeout: TimeInterval = 1.5
     var sttLanguage: String = "en"
+    var speakerMode: Bool = false
 
     /// Wake word trigger
     var triggerWord: String = "easy"
@@ -27,6 +28,7 @@ final class SpeechService: @unchecked Sendable {
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var passiveWatchdog: Timer?
 
     /// Whisper API service (injected externally)
     var whisperService: WhisperService?
@@ -41,9 +43,16 @@ final class SpeechService: @unchecked Sendable {
     private(set) var isListening = false
 
     /// VAD settings
-    private let speechThresholdDB: Float = -50
+    private let speechThresholdDB: Float = -70
     private let minSpeechDuration: TimeInterval = 0.3
     private var speechStartTime: Date?
+
+    /// Watchdog: track last callback time to detect stale recognition
+    private var lastCallbackTime: Date?
+
+    /// Activation timeout — return to passive if no speech after wake word
+    private var activationTimer: Timer?
+    var onActivationTimeout: (() -> Void)?
 
     /// Ding playback
     private var dingAudioPlayer: AVAudioPlayer?
@@ -81,11 +90,14 @@ final class SpeechService: @unchecked Sendable {
     }
 
     func startListening() throws {
-        guard !isListening else { return }
+        if isListening { stopListening() }
 
         let audioSession = AVAudioSession.sharedInstance()
         try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
         try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        if speakerMode {
+            try audioSession.overrideOutputAudioPort(.speaker)
+        }
 
         guard audioSession.isInputAvailable else { return }
 
@@ -120,6 +132,8 @@ final class SpeechService: @unchecked Sendable {
     func stopListening() {
         silenceTimer?.invalidate()
         silenceTimer = nil
+        activationTimer?.invalidate()
+        activationTimer = nil
 
         stopPassiveRecognition()
 
@@ -210,6 +224,7 @@ final class SpeechService: @unchecked Sendable {
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
             self.callbackCounter += 1
+            self.lastCallbackTime = Date()
 
             if let result {
                 let text = result.bestTranscription.formattedString
@@ -224,6 +239,23 @@ final class SpeechService: @unchecked Sendable {
                     DispatchQueue.main.async {
                         self.onTextChanged?("")
                         self.onTriggerDetected?()
+                        // Activation timeout: return to passive if no speech
+                        self.activationTimer?.invalidate()
+                        self.activationTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
+                            guard let self, self.isActivated else { return }
+                            log.info("Activation timeout, back to passive")
+                            self.isActivated = false
+                            self.isSpeaking = false
+                            self.speechStartTime = nil
+                            self.bufferLock.lock()
+                            self.audioBuffer.removeAll()
+                            self.bufferLock.unlock()
+                            self.startPassiveRecognition()
+                            DispatchQueue.main.async {
+                                self.onDebugLog?("timeout → passive")
+                                self.onActivationTimeout?()
+                            }
+                        }
                     }
                     return
                 }
@@ -238,11 +270,12 @@ final class SpeechService: @unchecked Sendable {
 
             if let error {
                 let nsError = error as NSError
-                // 1110 = normal cancellation after wake word detected
-                if nsError.code != 1110 {
-                    log.error("SFSpeech error: \(nsError.domain) \(nsError.code) \(error.localizedDescription)")
+                // 1110 = normal cancellation (intentional stop/restart) — do NOT restart
+                if nsError.code == 1110 {
+                    return
                 }
-                // Auto-restart quickly
+                log.error("SFSpeech error: \(nsError.domain) \(nsError.code) \(error.localizedDescription)")
+                // Auto-restart quickly for real errors
                 if self.isListening && !self.isActivated {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                         guard let self, self.isListening, !self.isActivated else { return }
@@ -254,11 +287,33 @@ final class SpeechService: @unchecked Sendable {
 
         tapCounter = 0
         callbackCounter = 0
+        lastCallbackTime = nil
         log.info("Passive recognition started")
         DispatchQueue.main.async { self.onDebugLog?("passive started") }
+
+        // Watchdog: repeating timer checks for stale recognition every 5s
+        DispatchQueue.main.async { [weak self] in
+            self?.passiveWatchdog?.invalidate()
+            self?.passiveWatchdog = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+                guard let self, self.isListening, !self.isActivated else { return }
+                // No callback ever received, or no callback in last 5s
+                let stale: Bool
+                if let last = self.lastCallbackTime {
+                    stale = Date().timeIntervalSince(last) > 5.0
+                } else {
+                    stale = self.callbackCounter == 0
+                }
+                guard stale else { return }
+                log.warning("SFSpeech watchdog: stale recognition, restarting (cb=\(self.callbackCounter))")
+                DispatchQueue.main.async { self.onDebugLog?("watchdog restart") }
+                self.startPassiveRecognition()
+            }
+        }
     }
 
     private func stopPassiveRecognition() {
+        passiveWatchdog?.invalidate()
+        passiveWatchdog = nil
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest?.endAudio()
@@ -280,6 +335,11 @@ final class SpeechService: @unchecked Sendable {
         dbLogCounter += 1
         if dbLogCounter % 50 == 0 {
             log.debug("dB=\(String(format: "%.1f", db)) threshold=\(self.speechThresholdDB) isSpeaking=\(self.isSpeaking)")
+            let dbVal = db
+            let speaking = isSpeaking
+            DispatchQueue.main.async {
+                self.onDebugLog?("active dB=\(String(format: "%.0f", dbVal)) spk=\(speaking)")
+            }
         }
 
         if db > speechThresholdDB {
@@ -287,6 +347,8 @@ final class SpeechService: @unchecked Sendable {
                 isSpeaking = true
                 speechStartTime = Date()
                 DispatchQueue.main.async {
+                    self.activationTimer?.invalidate()
+                    self.activationTimer = nil
                     self.onTextChanged?("Listening...")
                 }
             }
@@ -341,7 +403,7 @@ final class SpeechService: @unchecked Sendable {
 
         let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
         let avgDB = 20 * log10(max(rms, 1e-10))
-        if avgDB < -45 {
+        if avgDB < -70 {
             log.debug("avgDB=\(String(format: "%.1f", avgDB)) too quiet, skip")
             DispatchQueue.main.async { self.onTextChanged?("") }
             return
@@ -363,7 +425,8 @@ final class SpeechService: @unchecked Sendable {
                 let text = try await whisper.transcribe(audioData: wavData, language: lang)
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else {
-                    DispatchQueue.main.async { self.onTextChanged?("") }
+                    self.isActivated = false
+                    self.restartRecognition()
                     return
                 }
 
@@ -372,7 +435,8 @@ final class SpeechService: @unchecked Sendable {
                 let isHallucination = self.hallucinationPhrases.contains { lower.contains($0.lowercased()) }
                 if isHallucination {
                     log.info("Hallucination filter: \"\(trimmed)\" → skip")
-                    DispatchQueue.main.async { self.onTextChanged?("") }
+                    self.isActivated = false
+                    self.restartRecognition()
                     return
                 }
 
@@ -386,9 +450,8 @@ final class SpeechService: @unchecked Sendable {
                 }
             } catch {
                 log.error("Whisper error: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    self.onTextChanged?("")
-                }
+                self.isActivated = false
+                self.restartRecognition()
             }
         }
     }
@@ -489,11 +552,22 @@ final class SpeechService: @unchecked Sendable {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            if speakerMode {
+                try audioSession.overrideOutputAudioPort(.speaker)
+            }
+            dbLogCounter = 0
             engine.prepare()
             try engine.start()
-            log.info("Engine restarted for active mode")
+            let route = audioSession.currentRoute.inputs.first?.portType.rawValue ?? "unknown"
+            log.info("Engine restarted for active mode, input=\(route), sampleRate=\(self.recordingSampleRate)")
+            DispatchQueue.main.async {
+                self.onDebugLog?("active mode ready (\(route))")
+            }
         } catch {
             log.error("Engine restart failed: \(error)")
+            DispatchQueue.main.async {
+                self.onDebugLog?("engine restart FAIL: \(error.localizedDescription.prefix(30))")
+            }
         }
     }
 
@@ -501,9 +575,14 @@ final class SpeechService: @unchecked Sendable {
 
     /// Fuzzy match for wake word — accepts common SFSpeech misrecognitions
     private let triggerVariants: Set<String> = [
-        "easy", "eazy", "ease", "eezy", "e z",
-        "izi", "izzy", "easey", "ezee",
-        "eating", "is it", "ej",
+        // English
+        "easy", "eazy", "ease", "eezy", "ezee", "easey",
+        "izi", "izzy", "izy", "isy",
+        "eiji", "ej", "aj", "eg",
+        "ez", "eze", "ezzy",
+        // Misrecognitions
+        "eating", "is it", "e z", "e g",
+        "easing", "easily",
     ]
 
     private func containsTrigger(_ text: String) -> Bool {
@@ -518,7 +597,8 @@ final class SpeechService: @unchecked Sendable {
 
         for word in words {
             if triggerVariants.contains(word) { return true }
-            if word.hasPrefix("eas") || word.hasPrefix("eaz") || word.hasPrefix("eez") {
+            if word.hasPrefix("eas") || word.hasPrefix("eaz") || word.hasPrefix("eez")
+                || word.hasPrefix("eij") || word.hasPrefix("eig") || word.hasPrefix("eag") {
                 return true
             }
         }
