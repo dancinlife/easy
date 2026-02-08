@@ -117,7 +117,7 @@ struct VoiceView: View {
             }
         }
         .onDisappear {
-            vm.closeCurrentSession()
+            vm.stopAll()
         }
         .onChange(of: vm.relayState) { _, newState in
             if newState == .paired && vm.status == .idle {

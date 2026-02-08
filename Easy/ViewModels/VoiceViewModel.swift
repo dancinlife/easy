@@ -150,9 +150,16 @@ final class VoiceViewModel {
         relay.onStateChanged = { [weak self] newState in
             Task { @MainActor in
                 guard let self else { return }
+                let wasConnected = self.relayState == .paired
                 self.relayState = newState
                 if newState == .disconnected {
                     self.stopAll()
+                    // 서버 종료 → 현재 세션 삭제
+                    if wasConnected, let id = self.currentSessionId {
+                        self.sessionStore.deleteSession(id: id)
+                        self.currentSessionId = nil
+                        self.messages = []
+                    }
                 }
             }
         }
