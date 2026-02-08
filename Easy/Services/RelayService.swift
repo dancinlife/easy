@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-/// Relay 서버를 통한 E2E 암호화 통신 서비스
+/// E2E encrypted communication service via Relay server
 actor RelayService {
     private var webSocketTask: URLSessionWebSocketTask?
     private var urlSession: URLSession?
@@ -21,12 +21,12 @@ actor RelayService {
 
         var errorDescription: String? {
             switch self {
-            case .notConnected: "Relay 서버에 연결되지 않음"
-            case .notPaired: "페어링되지 않음 — QR 코드를 스캔하세요"
-            case .keyExchangeFailed: "키교환 실패"
-            case .timeout: "응답 시간 초과"
-            case .decryptionFailed: "복호화 실패"
-            case .invalidResponse: "잘못된 응답"
+            case .notConnected: "Not connected to relay server"
+            case .notPaired: "Not paired — scan QR code"
+            case .keyExchangeFailed: "Key exchange failed"
+            case .timeout: "Response timeout"
+            case .decryptionFailed: "Decryption failed"
+            case .invalidResponse: "Invalid response"
             }
         }
     }
@@ -67,7 +67,7 @@ actor RelayService {
         self.pairingInfo = info
         state = .connecting
 
-        print("[RelayService] 연결 시작: \(info.relayURL) room: \(info.room)")
+        print("[RelayService] Connecting: \(info.relayURL) room: \(info.room)")
 
         urlSession = URLSession(configuration: .default)
 
@@ -94,7 +94,7 @@ actor RelayService {
 
         guard connectionId == myConnectionId else { return }
         state = .paired
-        print("[RelayService] 페어링 완료")
+        print("[RelayService] Pairing complete")
     }
 
     func disconnect() {
@@ -106,7 +106,7 @@ actor RelayService {
 
     var isConnected: Bool { state == .paired }
 
-    /// 텍스트 전송 + 응답 수신 (E2E 암호화)
+    /// Send text + receive response (E2E encrypted)
     func askText(text: String, sessionId: String? = nil) async throws -> String {
         guard let sessionKey else {
             throw RelayError.notPaired
@@ -156,9 +156,9 @@ actor RelayService {
                 ] as [String: Any]
             ]
             try await sendJSON(msg)
-            print("[RelayService] session_end 전송: \(sessionId)")
+            print("[RelayService] session_end sent: \(sessionId)")
         } catch {
-            print("[RelayService] session_end 전송 실패: \(error)")
+            print("[RelayService] session_end send failed: \(error)")
         }
     }
 
@@ -218,7 +218,7 @@ actor RelayService {
     private func sendPing() {
         webSocketTask?.sendPing { error in
             if let error {
-                print("[RelayService] ping 실패: \(error.localizedDescription)")
+                print("[RelayService] Ping failed: \(error.localizedDescription)")
             }
         }
     }
@@ -268,7 +268,7 @@ actor RelayService {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else { return }
 
-        print("[RelayService] 수신: type=\(type) payload.type=\((json["payload"] as? [String: Any])?["type"] as? String ?? "N/A")")
+        print("[RelayService] Received: type=\(type) payload.type=\((json["payload"] as? [String: Any])?["type"] as? String ?? "N/A")")
 
         switch type {
         case "joined":
@@ -276,7 +276,7 @@ actor RelayService {
         case "peer_joined":
             break
         case "peer_left":
-            print("[RelayService] peer_left — 서버 연결 끊김")
+            print("[RelayService] peer_left — server disconnected")
             sessionKey = nil
             state = .disconnected
         case "message":
@@ -308,25 +308,25 @@ actor RelayService {
                       let hostname = json["hostname"] as? String else { return }
 
                 let info = ServerInfo(workDir: workDir, hostname: hostname)
-                print("[RelayService] server_info 수신: workDir=\(workDir) hostname=\(hostname)")
+                print("[RelayService] server_info received: workDir=\(workDir) hostname=\(hostname)")
                 let callback = onServerInfo
                 Task { @MainActor in
                     callback?(info)
                 }
             } catch {
-                print("[RelayService] server_info 복호화 실패: \(error)")
+                print("[RelayService] server_info decryption failed: \(error)")
             }
 
         case "server_shutdown":
-            print("[RelayService] server_shutdown 수신")
+            print("[RelayService] server_shutdown received")
             state = .disconnected
 
         case "text_answer":
-            print("[RelayService] text_answer 수신, sessionKey=\(sessionKey != nil), continuation=\(pendingTextContinuation != nil)")
+            print("[RelayService] text_answer received, sessionKey=\(sessionKey != nil), continuation=\(pendingTextContinuation != nil)")
             guard let sessionKey,
                   let encryptedBase64 = payload["encrypted"] as? String,
                   let encryptedData = Data(base64URLEncoded: encryptedBase64) else {
-                print("[RelayService] text_answer guard 실패")
+                print("[RelayService] text_answer guard failed")
                 pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                 pendingTextContinuation = nil
                 return
@@ -338,17 +338,17 @@ actor RelayService {
 
                 guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
                       let answer = json["answer"] as? String else {
-                    print("[RelayService] text_answer JSON 파싱 실패")
+                    print("[RelayService] text_answer JSON parse failed")
                     pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                     pendingTextContinuation = nil
                     return
                 }
 
-                print("[RelayService] text_answer 복호화 성공: \(answer.prefix(50))")
+                print("[RelayService] text_answer decrypted: \(answer.prefix(50))")
                 pendingTextContinuation?.resume(returning: answer.trimmingCharacters(in: .whitespacesAndNewlines))
                 pendingTextContinuation = nil
             } catch {
-                print("[RelayService] text_answer 복호화 실패: \(error)")
+                print("[RelayService] text_answer decryption failed: \(error)")
                 pendingTextContinuation?.resume(throwing: RelayError.decryptionFailed)
                 pendingTextContinuation = nil
             }

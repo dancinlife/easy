@@ -17,7 +17,7 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
         stop()
 
         guard let apiKey, !apiKey.isEmpty else {
-            print("[TTS] API 키 미설정")
+            print("[TTS] API key not set")
             onFinished?()
             return
         }
@@ -31,7 +31,7 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
                 try playAudio(audioData)
             } catch {
                 guard !Task.isCancelled else { return }
-                print("[TTS] 오류: \(error.localizedDescription)")
+                print("[TTS] Error: \(error.localizedDescription)")
                 isSpeaking = false
                 onFinished?()
             }
@@ -68,7 +68,7 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             let body = String(data: data, encoding: .utf8) ?? ""
             throw NSError(domain: "TTS", code: statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: "TTS API 오류 (\(statusCode)): \(body)"])
+                          userInfo: [NSLocalizedDescriptionKey: "TTS API error (\(statusCode)): \(body)"])
         }
         return data
     }

@@ -140,7 +140,7 @@ struct VoiceView: View {
     private var statusText: some View {
         switch vm.status {
         case .idle:
-            Text("탭하여 시작")
+            Text("Tap to start")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         case .listening:
@@ -154,7 +154,7 @@ struct VoiceView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "ear")
                         .font(.caption2)
-                    Text("듣고 있어요...")
+                    Text("Listening...")
                         .font(.caption)
                 }
                 .foregroundStyle(.green)
@@ -163,7 +163,7 @@ struct VoiceView: View {
             HStack(spacing: 4) {
                 ProgressView()
                     .controlSize(.small)
-                Text("생각하는 중...")
+                Text("Thinking...")
                     .font(.caption)
             }
             .foregroundStyle(.orange)
@@ -172,7 +172,7 @@ struct VoiceView: View {
                 Image(systemName: "speaker.wave.2")
                     .font(.caption2)
                     .symbolEffect(.variableColor.iterative, isActive: true)
-                Text("말하는 중...")
+                Text("Speaking...")
                     .font(.caption)
             }
             .foregroundStyle(.purple)
@@ -207,10 +207,10 @@ struct VoiceView: View {
 
     private var statusLabel: String {
         switch vm.relayState {
-        case .disconnected: "끊김"
-        case .connecting: "대기중"
-        case .connected: "대기중"
-        case .paired: "연결됨"
+        case .disconnected: "Off"
+        case .connecting: "Wait"
+        case .connected: "Wait"
+        case .paired: "Live"
         }
     }
 

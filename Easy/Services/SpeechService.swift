@@ -5,7 +5,7 @@ final class SpeechService: @unchecked Sendable {
     private var audioEngine: AVAudioEngine?
     private var silenceTimer: Timer?
 
-    // 오디오 버퍼 (Float 샘플 축적)
+    // Audio buffer (accumulate Float samples)
     private var audioBuffer: [Float] = []
     private let bufferLock = NSLock()
     private var isSpeaking = false
@@ -14,22 +14,22 @@ final class SpeechService: @unchecked Sendable {
     var silenceTimeout: TimeInterval = 1.5
     var sttLanguage: String = "en"
 
-    /// Whisper API 서비스 (외부에서 주입)
+    /// Whisper API service (injected externally)
     var whisperService: WhisperService?
 
-    /// 발화 확정 시 텍스트 전달
+    /// Delivers finalized utterance text
     var onUtteranceCaptured: ((String) -> Void)?
-    /// 실시간 상태 텍스트
+    /// Real-time status text
     var onTextChanged: ((String) -> Void)?
 
     private(set) var isListening = false
 
-    /// VAD 설정
-    private let speechThresholdDB: Float = -50  // 이 값 초과 시 발화로 판단
-    private let minSpeechDuration: TimeInterval = 0.3  // 최소 발화 길이 (초)
+    /// VAD settings
+    private let speechThresholdDB: Float = -50  // speech detected above this
+    private let minSpeechDuration: TimeInterval = 0.3  // min speech duration (sec)
     private var speechStartTime: Date?
 
-    /// Whisper 환각 필터 — 무음/노이즈에서 반복 출력되는 알려진 문구
+    /// Whisper hallucination filter — known phrases repeated on silence/noise
     private let hallucinationPhrases: [String] = [
         "MBC 뉴스", "이덕영입니다", "시청해 주셔서 감사합니다",
         "구독과 좋아요", "영상이 도움이 되셨다면", "감사합니다",
@@ -65,7 +65,7 @@ final class SpeechService: @unchecked Sendable {
         let nativeFormat = inputNode.outputFormat(forBus: 0)
         recordingSampleRate = nativeFormat.sampleRate
 
-        // 오디오 tap 설치 — RMS 기반 VAD + 버퍼 축적
+        // Install audio tap — RMS-based VAD + buffer accumulation
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] buffer, _ in
             self?.processAudioBuffer(buffer)
         }
@@ -79,7 +79,7 @@ final class SpeechService: @unchecked Sendable {
         engine.prepare()
         try engine.start()
         isListening = true
-        print("[Speech] Whisper 모드 시작 (\(sttLanguage))")
+        print("[Speech] Whisper mode started (\(sttLanguage))")
     }
 
     func stopListening() {
@@ -113,7 +113,7 @@ final class SpeechService: @unchecked Sendable {
         DispatchQueue.main.async {
             self.onTextChanged?("")
         }
-        print("[Speech] 인식 재시작")
+        print("[Speech] Recognition restarted")
     }
 
     // MARK: - Audio Processing
@@ -124,7 +124,7 @@ final class SpeechService: @unchecked Sendable {
         let frameLength = Int(buffer.frameLength)
         let samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
 
-        // RMS → dB 계산
+        // RMS → dB calculation
         let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(frameLength))
         let db = 20 * log10(max(rms, 1e-10))
 
@@ -134,29 +134,29 @@ final class SpeechService: @unchecked Sendable {
         }
 
         if db > speechThresholdDB {
-            // 발화 감지
+            // Speech detected
             if !isSpeaking {
                 isSpeaking = true
                 speechStartTime = Date()
                 DispatchQueue.main.async {
-                    self.onTextChanged?("듣는 중...")
+                    self.onTextChanged?("Listening...")
                 }
             }
 
-            // 버퍼에 샘플 추가
+            // Append samples to buffer
             bufferLock.lock()
             audioBuffer.append(contentsOf: samples)
             bufferLock.unlock()
 
-            // 침묵 타이머 리셋
+            // Reset silence timer
             resetSilenceTimer()
         } else if isSpeaking {
-            // 발화 중이지만 조용 → 버퍼에 계속 추가 (패딩)
+            // Speaking but quiet → keep adding to buffer (padding)
             bufferLock.lock()
             audioBuffer.append(contentsOf: samples)
             bufferLock.unlock()
 
-            // 침묵 구간: 타이머 리셋하지 않음 → 기존 타이머가 만료되면 캡처
+            // Silence: don't reset timer → capture when existing timer expires
         }
     }
 
@@ -177,7 +177,7 @@ final class SpeechService: @unchecked Sendable {
             return
         }
 
-        // 최소 발화 길이 확인
+        // Check minimum speech duration
         if let start = speechStartTime, Date().timeIntervalSince(start) < minSpeechDuration {
             isSpeaking = false
             speechStartTime = nil
@@ -187,7 +187,7 @@ final class SpeechService: @unchecked Sendable {
             return
         }
 
-        // 버퍼 복사 후 클리어
+        // Copy buffer and clear
         bufferLock.lock()
         let samples = audioBuffer
         audioBuffer.removeAll()
@@ -197,24 +197,24 @@ final class SpeechService: @unchecked Sendable {
         speechStartTime = nil
 
         guard !samples.isEmpty else {
-            print("[Speech] 빈 버퍼, skip")
+            print("[Speech] Empty buffer, skip")
             return
         }
 
         let duration = Double(samples.count) / recordingSampleRate
-        print("[Speech] 캡처 완료: \(String(format: "%.1f", duration))초, \(samples.count) samples")
+        print("[Speech] Captured: \(String(format: "%.1f", duration))s, \(samples.count) samples")
 
-        // 오디오 에너지 체크 — 너무 조용하면 Whisper 환각 방지
+        // Audio energy check — skip if too quiet to prevent Whisper hallucination
         let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
         let avgDB = 20 * log10(max(rms, 1e-10))
         if avgDB < -45 {
-            print("[Speech] 평균 dB=\(String(format: "%.1f", avgDB)) 너무 조용, skip")
+            print("[Speech] avgDB=\(String(format: "%.1f", avgDB)) too quiet, skip")
             DispatchQueue.main.async { self.onTextChanged?("") }
             return
         }
 
         DispatchQueue.main.async {
-            self.onTextChanged?("인식 중...")
+            self.onTextChanged?("Recognizing...")
         }
 
         let wavData = createWAV(from: samples, sampleRate: recordingSampleRate)
@@ -223,7 +223,7 @@ final class SpeechService: @unchecked Sendable {
         Task {
             do {
                 guard let whisper = whisperService else {
-                    print("[Speech] WhisperService 미설정")
+                    print("[Speech] WhisperService not configured")
                     return
                 }
                 let text = try await whisper.transcribe(audioData: wavData, language: lang)
@@ -233,22 +233,22 @@ final class SpeechService: @unchecked Sendable {
                     return
                 }
 
-                // Whisper 환각 필터
+                // Whisper hallucination filter
                 let lower = trimmed.lowercased()
                 let isHallucination = self.hallucinationPhrases.contains { lower.contains($0.lowercased()) }
                 if isHallucination {
-                    print("[Speech] 환각 필터: \"\(trimmed)\" → skip")
+                    print("[Speech] Hallucination filter: \"\(trimmed)\" → skip")
                     DispatchQueue.main.async { self.onTextChanged?("") }
                     return
                 }
 
-                print("[Speech] Whisper 인식: \"\(trimmed)\"")
+                print("[Speech] Whisper recognized: \"\(trimmed)\"")
                 DispatchQueue.main.async {
                     self.onTextChanged?(trimmed)
                     self.onUtteranceCaptured?(trimmed)
                 }
             } catch {
-                print("[Speech] Whisper 오류: \(error.localizedDescription)")
+                print("[Speech] Whisper error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     self.onTextChanged?("")
                 }

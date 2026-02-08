@@ -28,7 +28,7 @@ actor WhisperService {
         body.appendMultipart(boundary: boundary, name: "model", value: "whisper-1")
         // language
         body.appendMultipart(boundary: boundary, name: "language", value: language)
-        // prompt — 개발 용어 컨텍스트 힌트
+        // prompt — dev context hint
         body.appendMultipart(boundary: boundary, name: "prompt", value: "Software development using Claude Code.")
 
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
@@ -56,9 +56,9 @@ actor WhisperService {
 
         var errorDescription: String? {
             switch self {
-            case .noAPIKey: "OpenAI API 키가 설정되지 않았습니다"
-            case .invalidResponse: "잘못된 응답"
-            case .apiError(let code, let msg): "Whisper API 오류 (\(code)): \(msg)"
+            case .noAPIKey: "OpenAI API key not configured"
+            case .invalidResponse: "Invalid response"
+            case .apiError(let code, let msg): "Whisper API error (\(code)): \(msg)"
             }
         }
     }

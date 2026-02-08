@@ -1,7 +1,7 @@
 import SwiftUI
 import AVFoundation
 
-/// QR 코드 스캐너 뷰 — easy://pair?... URL을 스캔하여 페어링
+/// QR code scanner view — scans easy://pair?... URL for pairing
 struct QRScannerView: View {
     let onPaired: (PairingInfo) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -17,13 +17,13 @@ struct QRScannerView: View {
                 VStack {
                     Spacer()
 
-                    // 안내 텍스트
+                    // Instructions
                     VStack(spacing: 8) {
-                        Text("Mac 터미널의 QR 코드를 스캔하세요")
+                        Text("Scan the QR code from Mac terminal")
                             .font(.headline)
                             .foregroundStyle(.white)
 
-                        Text("easy-server --relay 실행 시 표시되는 QR")
+                        Text("Displayed when running easy-server --relay")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.7))
 
@@ -40,11 +40,11 @@ struct QRScannerView: View {
                     .padding()
                 }
             }
-            .navigationTitle("QR 스캔")
+            .navigationTitle("Scan QR")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("취소") { dismiss() }
+                    Button("Cancel") { dismiss() }
                 }
             }
         }
@@ -55,7 +55,7 @@ struct QRScannerView: View {
 
         guard let url = URL(string: code),
               let info = PairingInfo(url: url) else {
-            error = "유효하지 않은 QR 코드입니다"
+            error = "Invalid QR code"
             return
         }
 

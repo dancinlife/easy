@@ -1,7 +1,7 @@
 import Foundation
 
-/// QR 코드에서 파싱한 페어링 정보
-/// URL 형식: easy://pair?relay=wss://...&room=<uuid>&pub=<base64url-pubkey>
+/// Pairing info parsed from QR code
+/// URL format: easy://pair?relay=wss://...&room=<uuid>&pub=<base64url-pubkey>
 struct PairingInfo: Codable, Equatable {
     let relayURL: String
     let room: String

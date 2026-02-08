@@ -11,7 +11,7 @@ final class VoiceViewModel {
     var error: String?
     var recognizedText: String = ""
 
-    // Utterance Queue (mcp-voice-hooks 패턴)
+    // Utterance Queue (mcp-voice-hooks pattern)
     private var pendingUtterances: [String] = []
     private var isProcessing = false
 
@@ -24,7 +24,7 @@ final class VoiceViewModel {
         }
     }
 
-    // Relay 상태
+    // Relay state
     var relayState: RelayService.ConnectionState = .disconnected
     var pairedRelayURL: String? {
         get { UserDefaults.standard.string(forKey: "pairedRelayURL") }
@@ -106,21 +106,21 @@ final class VoiceViewModel {
         tts.apiKey = openAIKey.isEmpty ? nil : openAIKey
         tts.voice = ttsVoice
 
-        // 실시간 텍스트 업데이트
+        // Real-time text updates
         speech.onTextChanged = { [weak self] text in
             Task { @MainActor in
                 self?.recognizedText = text
             }
         }
 
-        // 발화 캡처 → 큐에 추가 (mcp-voice-hooks: pending)
+        // Utterance captured → add to queue (mcp-voice-hooks: pending)
         speech.onUtteranceCaptured = { [weak self] text in
             Task { @MainActor in
                 self?.handleUtterance(text)
             }
         }
 
-        // TTS 완료 → 큐 확인 또는 다시 듣기
+        // TTS finished → check queue or resume listening
         tts.onFinished = { [weak self] in
             Task { @MainActor in
                 guard let self, self.currentSessionId != nil else { return }
@@ -139,7 +139,7 @@ final class VoiceViewModel {
                       var session = self.sessionStore.sessions.first(where: { $0.id == sid }) else { return }
                 session.workDir = info.workDir
                 session.hostname = info.hostname
-                if session.name == "새 세션" {
+                if session.name == "New Session" {
                     let basename = (info.workDir as NSString).lastPathComponent
                     if !basename.isEmpty { session.name = basename }
                 }
@@ -154,7 +154,7 @@ final class VoiceViewModel {
                 self.relayState = newState
                 if newState == .disconnected {
                     self.stopAll()
-                    // 서버 종료 → 현재 세션 삭제
+                    // Server shutdown → delete current session
                     if wasConnected, let id = self.currentSessionId {
                         self.sessionStore.deleteSession(id: id)
                         self.currentSessionId = nil
@@ -164,7 +164,7 @@ final class VoiceViewModel {
             }
         }
 
-        // 백그라운드 진입 시 음성 중지
+        // Stop audio when entering background
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil, queue: .main
@@ -179,7 +179,7 @@ final class VoiceViewModel {
             }
         }
 
-        // 포그라운드 복귀 시 재연결
+        // Reconnect when returning to foreground
         NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
             object: nil, queue: .main
@@ -191,13 +191,13 @@ final class VoiceViewModel {
         }
     }
 
-    // MARK: - Utterance Queue (mcp-voice-hooks 패턴)
+    // MARK: - Utterance Queue (mcp-voice-hooks pattern)
 
     private func handleUtterance(_ text: String) {
         pendingUtterances.append(text)
 
         if status == .speaking {
-            // Barge-in: TTS 중단 + 새 발화 처리
+            // Barge-in: stop TTS + process new utterance
             tts.stop()
             status = .listening
         }
@@ -227,7 +227,7 @@ final class VoiceViewModel {
         status = .thinking
         recognizedText = text
 
-        // 유저 메시지 추가
+        // Add user message
         messages.append(Message(role: .user, text: text))
         if let sid = currentSessionId {
             sessionStore.appendMessage(sessionId: sid, message: .init(role: .user, text: text))
@@ -239,16 +239,16 @@ final class VoiceViewModel {
                 sessionId: currentSessionId
             )
 
-            // 세션이 이미 닫혔으면 무시
+            // Ignore if session already closed
             guard currentSessionId != nil else { return }
 
-            // 어시스턴트 응답
+            // Assistant response
             messages.append(Message(role: .assistant, text: answer))
             if let sid = currentSessionId {
                 sessionStore.appendMessage(sessionId: sid, message: .init(role: .assistant, text: answer))
             }
 
-            // TTS 재생 (마이크는 계속 열려 있음 → barge-in 가능)
+            // TTS playback (mic stays open → barge-in possible)
             status = .speaking
             tts.speak(answer)
         } catch {
@@ -309,11 +309,11 @@ final class VoiceViewModel {
     func startListening() {
         print("[VoiceVM] startListening called, isConfigured=\(isConfigured), openAIKey=\(openAIKey.isEmpty ? "empty" : "set")")
         guard isConfigured else {
-            error = "QR 코드를 스캔하여 페어링해주세요"
+            error = "Scan QR code to pair"
             return
         }
         guard !openAIKey.isEmpty else {
-            error = "설정에서 OpenAI API 키를 입력해주세요"
+            error = "Enter OpenAI API key in Settings"
             return
         }
 
@@ -321,7 +321,7 @@ final class VoiceViewModel {
             let permitted = await speech.requestPermission()
             print("[VoiceVM] mic permission: \(permitted)")
             guard permitted else {
-                self.error = "마이크 권한이 필요합니다"
+                self.error = "Microphone permission required"
                 return
             }
             do {
@@ -330,7 +330,7 @@ final class VoiceViewModel {
                 error = nil
                 recognizedText = ""
             } catch {
-                self.error = "녹음 시작 실패: \(error.localizedDescription)"
+                self.error = "Failed to start recording: \(error.localizedDescription)"
             }
         }
     }
@@ -370,8 +370,8 @@ final class VoiceViewModel {
                 try await relay.connect(with: info)
                 error = nil
             } catch {
-                print("[VoiceVM] Relay 연결 실패: \(error)")
-                self.error = "Relay 연결 실패: \(error)"
+                print("[VoiceVM] Relay connection failed: \(error)")
+                self.error = "Relay connection failed: \(error)"
             }
         }
     }
@@ -386,8 +386,8 @@ final class VoiceViewModel {
                 try await relay.connect(with: info)
                 error = nil
             } catch {
-                print("[VoiceVM] Relay 연결 실패: \(error)")
-                self.error = "Relay 연결 실패: \(error)"
+                print("[VoiceVM] Relay connection failed: \(error)")
+                self.error = "Relay connection failed: \(error)"
             }
         }
     }
@@ -404,7 +404,7 @@ final class VoiceViewModel {
                 try await relay.connect(with: info)
                 error = nil
             } catch {
-                self.error = "재연결 실패: \(error.localizedDescription)"
+                self.error = "Reconnection failed: \(error.localizedDescription)"
             }
         }
     }
@@ -413,7 +413,7 @@ final class VoiceViewModel {
 
     func handlePairingURL(_ url: URL) {
         guard let info = PairingInfo(url: url) else {
-            error = "유효하지 않은 페어링 URL: \(url.absoluteString)"
+            error = "Invalid pairing URL: \(url.absoluteString)"
             return
         }
         startNewSession(with: info)

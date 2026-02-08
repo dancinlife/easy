@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Easy Server — Claude Code Voice Relay (Node.js)
-// Mac에서 실행. iPhone Easy 앱과 Relay를 통해 E2E 암호화 통신.
+// Runs on Mac. E2E encrypted communication with iPhone Easy app via Relay.
 //
-// 설치: npm install -g easy-server
-// 실행: easy --relay wss://your-relay.fly.dev
+// Install: npm install -g easy-server
+// Run: easy --relay wss://your-relay.fly.dev
 
 const crypto = require("crypto");
 const { execSync, spawn } = require("child_process");
@@ -33,13 +33,13 @@ if (relayIdx !== -1 && args[relayIdx + 1]) {
 }
 
 if (args.includes("--help") || args.includes("-h")) {
-  console.log(`Easy — Claude Code 음성 인터페이스
+  console.log(`Easy — Claude Code Voice Interface
 
-사용법:
-  easy                          기본 relay로 시작
-  easy --relay <url>            커스텀 relay 서버 지정
-  easy --new                    새 페어링 키 생성
-  easy --help                   도움말`);
+Usage:
+  easy                          Start with default relay
+  easy --relay <url>            Specify custom relay server
+  easy --new                    Generate new pairing key
+  easy --help                   Show help`);
   process.exit(0);
 }
 
@@ -81,17 +81,17 @@ function loadOrCreateIdentity() {
         format: "der",
         type: "pkcs8",
       });
-      console.log("[설정] 저장된 키 로드");
+      console.log("[Config] Loaded saved key");
       return { privateKey, room: data.room, publicKeyRaw: Buffer.from(data.publicKeyRaw, "base64") };
     } catch (e) {
-      console.log("[설정] 저장된 키 로드 실패, 새로 생성");
+      console.log("[Config] Failed to load saved key, generating new one");
     }
   }
 
   const { privateKey, publicKey } = crypto.generateKeyPairSync("x25519");
   const room = crypto.randomUUID();
 
-  // raw 공개키 (32바이트)
+  // raw public key (32 bytes)
   const publicKeyRaw = publicKey.export({ type: "spki", format: "der" }).slice(-32);
   const privateKeyPkcs8 = privateKey.export({ type: "pkcs8", format: "der" });
 
@@ -101,7 +101,7 @@ function loadOrCreateIdentity() {
     room,
   };
   fs.writeFileSync(IDENTITY_FILE, JSON.stringify(data, null, 2));
-  console.log("[설정] 새 키 생성");
+  console.log("[Config] New key generated");
 
   return { privateKey, room, publicKeyRaw };
 }
@@ -141,7 +141,7 @@ function aesGcmDecrypt(combined, key) {
 }
 
 function deriveSharedKey(privateKey, peerPublicKeyRaw) {
-  // raw 32바이트 → SPKI DER 포맷으로 변환
+  // raw 32 bytes → SPKI DER format conversion
   const spkiPrefix = Buffer.from("302a300506032b656e032100", "hex");
   const spkiDer = Buffer.concat([spkiPrefix, peerPublicKeyRaw]);
   const peerPubKey = crypto.createPublicKey({ key: spkiDer, format: "der", type: "spki" });
@@ -160,16 +160,16 @@ function deriveSharedKey(privateKey, peerPublicKeyRaw) {
   return Buffer.from(new Uint8Array(derived));
 }
 
-// ─── Claude (async spawn, 직렬화) ───
+// ─── Claude (async spawn, serialized) ───
 
 let claudeQueue = Promise.resolve();
-const activeSessions = new Set(); // 이미 생성된 세션 추적
+const activeSessions = new Set(); // track already created sessions
 
 function runClaude(question, sessionId) {
   const job = claudeQueue.then(async () => {
     const result = await _runClaudeOnce(question, sessionId);
     if (result === null && sessionId) {
-      console.log("[Claude] 세션 실패 — 세션 없이 재시도");
+      console.log("[Claude] Session failed — retrying without session");
       return _runClaudeOnce(question, null);
     }
     return result;
@@ -211,7 +211,7 @@ function _runClaudeOnce(question, sessionId) {
     child.stderr.on("data", (data) => { stderr += data.toString(); });
 
     const timer = setTimeout(() => {
-      console.log("[claude 타임아웃] 120초 초과, 프로세스 종료");
+      console.log("[Claude] Timeout: 120s exceeded, killing process");
       child.kill("SIGTERM");
       resolve(null);
     }, 120_000);
@@ -219,7 +219,7 @@ function _runClaudeOnce(question, sessionId) {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        console.log(`[claude 오류] exit=${code} stderr=${stderr.slice(0, 200)}`);
+        console.log(`[Claude] Error: exit=${code} stderr=${stderr.slice(0, 200)}`);
       } else if (sessionId) {
         activeSessions.add(sessionId);
       }
@@ -229,7 +229,7 @@ function _runClaudeOnce(question, sessionId) {
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      console.log(`[claude 오류] ${err.message}`);
+      console.log(`[Claude] Error: ${err.message}`);
       resolve(null);
     });
   });
@@ -246,7 +246,7 @@ function printQR(text) {
     const qr = require("qrcode-terminal");
     qr.generate(text, { small: true }, (code) => console.log(code));
   } catch {
-    console.log("[QR 표시 실패 — npm install qrcode-terminal]");
+    console.log("[QR display failed — npm install qrcode-terminal]");
   }
 }
 
@@ -263,14 +263,14 @@ class RelayConnector {
   }
 
   connect() {
-    console.log(`[Relay] 연결 중: ${this.relayURL}`);
+    console.log(`[Relay] Connecting: ${this.relayURL}`);
     if (this.pingInterval) clearInterval(this.pingInterval);
     this.ws = new WebSocket(this.relayURL);
 
     this.ws.on("open", () => {
-      console.log("[Relay] WebSocket 연결됨");
+      console.log("[Relay] WebSocket connected");
       this.send({ type: "join", room: this.room });
-      // 15초마다 ping으로 연결 유지
+      // Keep alive with ping every 15s
       this.pingInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.ping();
@@ -283,23 +283,23 @@ class RelayConnector {
         const str = raw.toString();
         const msg = JSON.parse(str);
         if (msg.type !== "message" || !msg.payload?.type?.startsWith("key_exchange")) {
-          console.log(`[WS 수신] type=${msg.type} payload.type=${msg.payload?.type || "N/A"} (${str.length}bytes)`);
+          console.log(`[WS recv] type=${msg.type} payload.type=${msg.payload?.type || "N/A"} (${str.length}bytes)`);
         }
         this.handleMessage(msg);
       } catch (err) {
-        console.log(`[WS 파싱 오류] ${err.message} raw=${raw.toString().slice(0, 100)}`);
+        console.log(`[WS parse error] ${err.message} raw=${raw.toString().slice(0, 100)}`);
       }
     });
 
     this.ws.on("close", () => {
-      console.log("[Relay] 연결 끊김, 3초 후 재접속...");
+      console.log("[Relay] Disconnected, reconnecting in 3s...");
       if (this.pingInterval) clearInterval(this.pingInterval);
       this.sessionKey = null;
       setTimeout(() => this.connect(), 3000);
     });
 
     this.ws.on("error", (err) => {
-      console.log(`[Relay 오류] ${err.message}`);
+      console.log(`[Relay] Error: ${err.message}`);
     });
   }
 
@@ -312,20 +312,20 @@ class RelayConnector {
   handleMessage(msg) {
     switch (msg.type) {
       case "joined":
-        console.log(`[Relay] Room 참가 완료 (피어: ${msg.peers || 0}명)`);
+        console.log(`[Relay] Joined room (peers: ${msg.peers || 0})`);
         break;
       case "peer_joined":
-        console.log("[Relay] iPhone 연결됨!");
+        console.log("[Relay] iPhone connected!");
         break;
       case "peer_left":
-        console.log("[Relay] iPhone 연결 끊김");
+        console.log("[Relay] iPhone disconnected");
         this.sessionKey = null;
         break;
       case "message":
         if (msg.payload) this.handlePayload(msg.payload);
         break;
       case "error":
-        console.log(`[Relay 오류] ${msg.message}`);
+        console.log(`[Relay] Error: ${msg.message}`);
         break;
     }
   }
@@ -351,25 +351,25 @@ class RelayConnector {
       const peerPubRaw = fromBase64url(payload.publicKey);
       const encryptedData = fromBase64url(payload.encryptedSessionKey);
 
-      console.log(`[키교환] peerPub: ${peerPubRaw.length}bytes, encrypted: ${encryptedData.length}bytes`);
+      console.log(`[KeyExchange] peerPub: ${peerPubRaw.length}bytes, encrypted: ${encryptedData.length}bytes`);
 
       const derivedKey = deriveSharedKey(this.privateKey, peerPubRaw);
 
-      console.log(`[키교환] derivedKey: ${derivedKey.slice(0, 8).toString("hex")}... (${derivedKey.length}bytes)`);
-      console.log(`[키교환] encData nonce: ${encryptedData.slice(0, 12).toString("hex")}`);
+      console.log(`[KeyExchange] derivedKey: ${derivedKey.slice(0, 8).toString("hex")}... (${derivedKey.length}bytes)`);
+      console.log(`[KeyExchange] encData nonce: ${encryptedData.slice(0, 12).toString("hex")}`);
 
       const sessionKeyData = aesGcmDecrypt(encryptedData, derivedKey);
       this.sessionKey = sessionKeyData;
 
-      console.log(`[키교환] 세션키: ${sessionKeyData.slice(0, 8).toString("hex")}... (${sessionKeyData.length}bytes)`);
-      console.log("[Relay] 키교환 완료 — E2E 암호화 활성화");
+      console.log(`[KeyExchange] sessionKey: ${sessionKeyData.slice(0, 8).toString("hex")}... (${sessionKeyData.length}bytes)`);
+      console.log("[Relay] Key exchange complete — E2E encryption active");
       this.send({ type: "message", payload: { type: "key_exchange_ack" } });
 
-      // server_info 전송
+      // Send server_info
       this.sendServerInfo();
     } catch (err) {
-      console.log(`[오류] 키교환 실패: ${err.message}`);
-      console.log(`[오류] 스택: ${err.stack?.split("\n").slice(0, 3).join(" | ")}`);
+      console.log(`[Error] Key exchange failed: ${err.message}`);
+      console.log(`[Error] Stack: ${err.stack?.split("\n").slice(0, 3).join(" | ")}`);
     }
   }
 
@@ -380,9 +380,9 @@ class RelayConnector {
       const plain = Buffer.from(JSON.stringify(info));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
       this.send({ type: "message", payload: { type: "server_info", encrypted: base64url(encrypted) } });
-      console.log(`[Relay] server_info 전송: workDir=${info.workDir} hostname=${info.hostname}`);
+      console.log(`[Relay] server_info sent: workDir=${info.workDir} hostname=${info.hostname}`);
     } catch (err) {
-      console.log(`[오류] server_info 전송 실패: ${err.message}`);
+      console.log(`[Error] server_info send failed: ${err.message}`);
     }
   }
 
@@ -392,15 +392,15 @@ class RelayConnector {
       const plain = Buffer.from(JSON.stringify({ type: "server_shutdown" }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
       this.send({ type: "message", payload: { type: "server_shutdown", encrypted: base64url(encrypted) } });
-      console.log("[Relay] server_shutdown 전송");
+      console.log("[Relay] server_shutdown sent");
     } catch (err) {
-      console.log(`[오류] server_shutdown 전송 실패: ${err.message}`);
+      console.log(`[Error] server_shutdown send failed: ${err.message}`);
     }
   }
 
   async handleAskText(payload) {
     if (!this.sessionKey) {
-      console.log("[오류] 세션키 없음 — ask_text 무시");
+      console.log("[Error] No session key — ignoring ask_text");
       return;
     }
 
@@ -412,20 +412,20 @@ class RelayConnector {
       const text = json.text;
       const sessionId = json.sessionId ? json.sessionId.toLowerCase() : null;
 
-      console.log(`[질문] "${text}" (세션: ${sessionId || "none"})`);
+      console.log(`[Question] "${text}" (session: ${sessionId || "none"})`);
 
-      // Claude 실행
-      console.log("[Claude] 실행 중...");
-      const answer = (await runClaude(text, sessionId)) || "오류: claude 실행 실패";
-      console.log(`[응답] ${answer.slice(0, 100)}${answer.length > 100 ? "..." : ""}`);
+      // Run Claude
+      console.log("[Claude] Running...");
+      const answer = (await runClaude(text, sessionId)) || "Error: claude execution failed";
+      console.log(`[Answer] ${answer.slice(0, 100)}${answer.length > 100 ? "..." : ""}`);
 
-      // 응답 전송
+      // Send response
       this.sendTextAnswer(answer);
-      console.log("[완료] 응답 전송됨");
+      console.log("[Done] Response sent");
     } catch (err) {
-      console.log(`[오류] 텍스트 처리 실패: ${err.message}`);
+      console.log(`[Error] Text processing failed: ${err.message}`);
       try {
-        this.sendTextAnswer(`오류: ${err.message}`);
+        this.sendTextAnswer(`Error: ${err.message}`);
       } catch {}
     }
   }
@@ -437,10 +437,10 @@ class RelayConnector {
       const plainData = aesGcmDecrypt(encryptedData, this.sessionKey);
       const json = JSON.parse(plainData.toString());
       const sid = json.sessionId;
-      console.log(`[세션] session_end 수신: sessionId=${sid || "unknown"}`);
+      console.log(`[Session] session_end received: sessionId=${sid || "unknown"}`);
       if (sid) activeSessions.delete(sid);
     } catch (err) {
-      console.log(`[오류] session_end 처리 실패: ${err.message}`);
+      console.log(`[Error] session_end processing failed: ${err.message}`);
     }
   }
 
@@ -459,7 +459,7 @@ class RelayConnector {
         },
       });
     } catch (err) {
-      console.log(`[오류] 응답 암호화 실패: ${err.message}`);
+      console.log(`[Error] Response encryption failed: ${err.message}`);
     }
   }
 }
@@ -469,7 +469,7 @@ class RelayConnector {
 async function main() {
   let config = loadConfig();
 
-  // relay URL: 인자 > config > 기본값
+  // relay URL: args > config > default
   if (relayIdx === -1 && config.relayURL) {
     relayURL = config.relayURL;
   }
@@ -477,7 +477,7 @@ async function main() {
   // Identity
   if (forceNew && fs.existsSync(IDENTITY_FILE)) {
     fs.unlinkSync(IDENTITY_FILE);
-    console.log("[설정] 기존 키 삭제");
+    console.log("[Config] Deleted existing key");
   }
 
   const { privateKey, room, publicKeyRaw } = loadOrCreateIdentity();
@@ -492,15 +492,15 @@ async function main() {
   console.log("");
   printQR(pairingURL);
   console.log("");
-  console.log(`페어링 URL: ${pairingURL}`);
-  console.log("iPhone에서 QR 코드를 스캔하세요.");
+  console.log(`Pairing URL: ${pairingURL}`);
+  console.log("Scan the QR code from your iPhone.");
   console.log("");
 
   const connector = new RelayConnector(relayURL, room, privateKey, publicKeyRaw);
   connector.connect();
 
   process.on("SIGINT", () => {
-    console.log("\n[종료] Ctrl+C — shutdown 전송 중...");
+    console.log("\n[Exit] Ctrl+C — sending shutdown...");
     connector.sendShutdown();
     setTimeout(() => process.exit(0), 300);
   });

@@ -9,7 +9,7 @@ struct Session: Identifiable, Codable {
     var createdAt: Date
     var messages: [SessionMessage]
 
-    init(id: String = UUID().uuidString, name: String = "새 세션", room: String? = nil, workDir: String? = nil, hostname: String? = nil, messages: [SessionMessage] = []) {
+    init(id: String = UUID().uuidString, name: String = "New Session", room: String? = nil, workDir: String? = nil, hostname: String? = nil, messages: [SessionMessage] = []) {
         self.id = id
         self.name = name
         self.room = room
@@ -90,7 +90,7 @@ final class SessionStore {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         sessions[idx].messages.append(message)
 
-        // 최근 유저 메시지로 세션 이름 업데이트
+        // Update session name with latest user message
         if message.role == .user {
             let name = String(message.text.prefix(30))
             if !name.isEmpty { sessions[idx].name = name }

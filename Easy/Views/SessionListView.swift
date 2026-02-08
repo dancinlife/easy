@@ -14,7 +14,7 @@ struct SessionListView: View {
                     path.append(session.id)
                 } label: {
                     HStack(spacing: 10) {
-                        // 연결 상태 dot
+                        // Connection status dot
                         Circle()
                             .fill(sessionDotColor(session))
                             .frame(width: 8, height: 8)
@@ -32,7 +32,7 @@ struct SessionListView: View {
                                 }
                                 Text(session.createdAt.formatted(.relative(presentation: .named)))
                                 Text("\u{00B7}")
-                                Text("\(session.messages.count)개 메시지")
+                                Text("\(session.messages.count) msgs")
 
                                 if let hostname = session.hostname {
                                     Text("\u{00B7}")
@@ -57,9 +57,9 @@ struct SessionListView: View {
         .overlay {
             if vm.sessionStore.sessions.isEmpty {
                 ContentUnavailableView(
-                    "세션 없음",
+                    "No Sessions",
                     systemImage: "qrcode.viewfinder",
-                    description: Text("Mac에서 easy를 실행하고\nQR 코드를 스캔하세요")
+                    description: Text("Run easy on your Mac\nand scan the QR code")
                 )
             }
         }

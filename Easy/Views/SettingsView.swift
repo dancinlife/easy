@@ -7,26 +7,26 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("음성 인식") {
-                    SecureField("OpenAI API 키", text: $vm.openAIKey)
+                Section("Speech Recognition") {
+                    SecureField("OpenAI API Key", text: $vm.openAIKey)
                         .textContentType(.password)
                         .autocorrectionDisabled()
 
-                    Picker("입력 언어", selection: $vm.sttLanguage) {
+                    Picker("Language", selection: $vm.sttLanguage) {
                         Text("English").tag("en")
-                        Text("한국어").tag("ko")
+                        Text("Korean").tag("ko")
                     }
 
                     HStack {
-                        Text("침묵 감지")
+                        Text("Silence Detection")
                         Slider(value: $vm.silenceTimeout, in: 1.0...3.0, step: 0.5)
-                        Text("\(vm.silenceTimeout, specifier: "%.1f")초")
+                        Text("\(vm.silenceTimeout, specifier: "%.1f")s")
                             .monospacedDigit()
                     }
                 }
 
                 Section {
-                    Picker("음성", selection: $vm.ttsVoice) {
+                    Picker("Voice", selection: $vm.ttsVoice) {
                         Text("Alloy").tag("alloy")
                         Text("Ash").tag("ash")
                         Text("Ballad").tag("ballad")
@@ -39,22 +39,22 @@ struct SettingsView: View {
                         Text("Shimmer").tag("shimmer")
                     }
 
-                    Toggle("자동 듣기", isOn: $vm.autoListen)
+                    Toggle("Auto Listen", isOn: $vm.autoListen)
                 } header: {
                     Text("TTS")
                 } footer: {
-                    Text("TTS 재생 완료 후 자동으로 음성 인식을 재시작합니다.")
+                    Text("Automatically restarts voice recognition after TTS playback.")
                 }
 
-                Section("정보") {
-                    LabeledContent("버전", value: "2.0.0")
+                Section("Info") {
+                    LabeledContent("Version", value: "2.0.0")
                 }
             }
-            .navigationTitle("설정")
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("완료") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
         }
