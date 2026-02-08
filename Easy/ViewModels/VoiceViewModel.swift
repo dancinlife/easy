@@ -108,12 +108,11 @@ final class VoiceViewModel {
     }
 
     // Speaker mode
-    var speakerMode: Bool {
-        get { UserDefaults.standard.object(forKey: "speakerMode") as? Bool ?? false }
-        set {
-            UserDefaults.standard.set(newValue, forKey: "speakerMode")
-            speech.speakerMode = newValue
-            applySpeakerOverride(newValue)
+    var speakerMode: Bool = UserDefaults.standard.object(forKey: "speakerMode") as? Bool ?? false {
+        didSet {
+            UserDefaults.standard.set(speakerMode, forKey: "speakerMode")
+            speech.speakerMode = speakerMode
+            applySpeakerOverride(speakerMode)
         }
     }
 
