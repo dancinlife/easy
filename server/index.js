@@ -515,14 +515,21 @@ async function main() {
   const connector = new RelayConnector(relayURL, room, privateKey, publicKeyRaw);
   connector.connect();
 
-  process.on("SIGINT", () => {
-    console.log("\n[Exit] Ctrl+C — sending shutdown...");
+  function cleanup(signal) {
+    console.log(`\n[Exit] ${signal} — shutting down...`);
     connector.sendShutdown();
     if (connector.ws) {
       connector.ws.close();
     }
+    if (connector.pingInterval) {
+      clearInterval(connector.pingInterval);
+    }
     setTimeout(() => process.exit(0), 500);
-  });
+  }
+
+  process.on("SIGINT", () => cleanup("SIGINT"));
+  process.on("SIGTERM", () => cleanup("SIGTERM"));
+  process.on("SIGHUP", () => cleanup("SIGHUP"));
 }
 
 main().catch((err) => {
