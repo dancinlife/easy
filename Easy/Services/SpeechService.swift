@@ -405,12 +405,16 @@ final class SpeechService: @unchecked Sendable {
         let avgDB = 20 * log10(max(rms, 1e-10))
         if avgDB < -70 {
             log.debug("avgDB=\(String(format: "%.1f", avgDB)) too quiet, skip")
-            DispatchQueue.main.async { self.onTextChanged?("") }
+            DispatchQueue.main.async {
+                self.onTextChanged?("")
+                self.onDebugLog?("skip: too quiet avgDB=\(String(format: "%.0f", avgDB))")
+            }
             return
         }
 
         DispatchQueue.main.async {
             self.onTextChanged?("Recognizing...")
+            self.onDebugLog?("whisper: \(String(format: "%.1f", duration))s \(samples.count) samples")
         }
 
         let wavData = createWAV(from: samples, sampleRate: recordingSampleRate)
@@ -420,11 +424,14 @@ final class SpeechService: @unchecked Sendable {
             do {
                 guard let whisper = whisperService else {
                     log.error("WhisperService not configured")
+                    DispatchQueue.main.async { self.onDebugLog?("whisper: no service!") }
                     return
                 }
+                DispatchQueue.main.async { self.onDebugLog?("whisper: calling API...") }
                 let text = try await whisper.transcribe(audioData: wavData, language: lang)
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else {
+                    DispatchQueue.main.async { self.onDebugLog?("whisper: empty result") }
                     self.isActivated = false
                     self.restartRecognition()
                     return
@@ -435,12 +442,14 @@ final class SpeechService: @unchecked Sendable {
                 let isHallucination = self.hallucinationPhrases.contains { lower.contains($0.lowercased()) }
                 if isHallucination {
                     log.info("Hallucination filter: \"\(trimmed)\" → skip")
+                    DispatchQueue.main.async { self.onDebugLog?("whisper: hallucination \"\(trimmed.prefix(20))\"") }
                     self.isActivated = false
                     self.restartRecognition()
                     return
                 }
 
                 log.notice("Whisper recognized: \"\(trimmed)\"")
+                DispatchQueue.main.async { self.onDebugLog?("whisper: \"\(trimmed.prefix(30))\"") }
 
                 // Deliver utterance and deactivate
                 self.isActivated = false
@@ -450,6 +459,9 @@ final class SpeechService: @unchecked Sendable {
                 }
             } catch {
                 log.error("Whisper error: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.onDebugLog?("whisper ERR: \(error.localizedDescription.prefix(40))")
+                }
                 self.isActivated = false
                 self.restartRecognition()
             }
@@ -578,7 +590,7 @@ final class SpeechService: @unchecked Sendable {
         // English
         "easy", "eazy", "ease", "eezy", "ezee", "easey",
         "izi", "izzy", "izy", "isy",
-        "eiji", "ej", "aj", "eg",
+        "eiji", "ichi", "ej", "aj", "eg",
         "ez", "eze", "ezzy",
         // Misrecognitions
         "eating", "is it", "e z", "e g",
