@@ -248,6 +248,7 @@ final class SpeechService: @unchecked Sendable {
                             self.isActivated = false
                             self.isSpeaking = false
                             self.speechStartTime = nil
+                            self.peakDB = -100
                             self.bufferLock.lock()
                             self.audioBuffer.removeAll()
                             self.bufferLock.unlock()
@@ -356,8 +357,6 @@ final class SpeechService: @unchecked Sendable {
                 speechStartTime = Date()
                 resetSilenceTimer()
                 DispatchQueue.main.async {
-                    self.activationTimer?.invalidate()
-                    self.activationTimer = nil
                     self.onTextChanged?("Listening...")
                 }
             } else {
@@ -496,7 +495,11 @@ final class SpeechService: @unchecked Sendable {
                 log.notice("Whisper recognized: \"\(trimmed)\"")
                 DispatchQueue.main.async { self.onDebugLog?("whisper: \"\(trimmed.prefix(30))\"") }
 
-                // Deliver utterance and deactivate
+                // Valid result — cancel activation timer and deliver utterance
+                DispatchQueue.main.async {
+                    self.activationTimer?.invalidate()
+                    self.activationTimer = nil
+                }
                 self.isActivated = false
                 DispatchQueue.main.async {
                     self.onTextChanged?(trimmed)
