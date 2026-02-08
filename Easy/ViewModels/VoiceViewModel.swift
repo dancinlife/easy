@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 import UIKit
 
 @Observable
@@ -10,6 +11,7 @@ final class VoiceViewModel {
     var status: Status = .idle
     var error: String?
     var recognizedText: String = ""
+    var isActivated: Bool = false
 
     // Utterance Queue (mcp-voice-hooks pattern)
     private var pendingUtterances: [String] = []
@@ -113,6 +115,15 @@ final class VoiceViewModel {
             }
         }
 
+        // Wake word detected → ding + activate
+        speech.onTriggerDetected = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isActivated = true
+                AudioServicesPlaySystemSound(1057)
+            }
+        }
+
         // Utterance captured → add to queue (mcp-voice-hooks: pending)
         speech.onUtteranceCaptured = { [weak self] text in
             Task { @MainActor in
@@ -194,6 +205,7 @@ final class VoiceViewModel {
     // MARK: - Utterance Queue (mcp-voice-hooks pattern)
 
     private func handleUtterance(_ text: String) {
+        isActivated = false
         pendingUtterances.append(text)
 
         if status == .speaking {
@@ -329,6 +341,7 @@ final class VoiceViewModel {
                 status = .listening
                 error = nil
                 recognizedText = ""
+                isActivated = false
             } catch {
                 self.error = "Failed to start recording: \(error.localizedDescription)"
             }

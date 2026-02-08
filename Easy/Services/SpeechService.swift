@@ -14,6 +14,11 @@ final class SpeechService: @unchecked Sendable {
     var silenceTimeout: TimeInterval = 1.5
     var sttLanguage: String = "en"
 
+    /// Wake word trigger
+    var triggerWord: String = "easy"
+    private(set) var isActivated: Bool = false
+    var onTriggerDetected: (() -> Void)?
+
     /// Whisper API service (injected externally)
     var whisperService: WhisperService?
 
@@ -92,6 +97,7 @@ final class SpeechService: @unchecked Sendable {
         }
         audioEngine = nil
         isListening = false
+        isActivated = false
         isSpeaking = false
         speechStartTime = nil
 
@@ -103,6 +109,7 @@ final class SpeechService: @unchecked Sendable {
     func restartRecognition() {
         silenceTimer?.invalidate()
         silenceTimer = nil
+        isActivated = false
         isSpeaking = false
         speechStartTime = nil
 
@@ -243,6 +250,25 @@ final class SpeechService: @unchecked Sendable {
                 }
 
                 print("[Speech] Whisper recognized: \"\(trimmed)\"")
+
+                // Wake word gate
+                if !self.isActivated {
+                    if self.isTriggerWord(trimmed) {
+                        print("[Speech] Trigger word detected!")
+                        self.isActivated = true
+                        DispatchQueue.main.async {
+                            self.onTextChanged?("")
+                            self.onTriggerDetected?()
+                        }
+                    } else {
+                        print("[Speech] Waiting for trigger word, ignoring: \"\(trimmed)\"")
+                        DispatchQueue.main.async { self.onTextChanged?("") }
+                    }
+                    return
+                }
+
+                // Activated → deliver utterance and deactivate
+                self.isActivated = false
                 DispatchQueue.main.async {
                     self.onTextChanged?(trimmed)
                     self.onUtteranceCaptured?(trimmed)
@@ -254,6 +280,16 @@ final class SpeechService: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    // MARK: - Trigger Word
+
+    private func isTriggerWord(_ text: String) -> Bool {
+        let cleaned = text
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+        return cleaned == triggerWord.lowercased()
     }
 
     // MARK: - WAV Encoding

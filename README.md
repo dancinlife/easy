@@ -19,11 +19,12 @@ iPhone (Easy app)                 Relay Server              Mac (easy server)
 
 1. Run `easy` on your Mac — a QR code appears in terminal
 2. Scan the QR from the iPhone app — E2E encrypted pairing established
-3. Speak naturally — Whisper transcribes, sends to Mac, Claude responds, TTS reads it back
-4. Continuous loop: listen → transcribe → think → speak → listen again
+3. Say **"easy"** — hear a ding, then speak your command
+4. Silence detected → auto-send → Claude responds → TTS reads it back → back to waiting for "easy"
 
 ## Features
 
+- **Wake Word**: Say "easy" to activate — like "Hey Siri" for Claude Code
 - **E2E Encryption**: Curve25519 ECDH key exchange + AES-256-GCM for all messages
 - **Barge-in**: Interrupt TTS mid-speech with a new voice command
 - **Session Management**: Multiple sessions, auto-cleanup on server disconnect

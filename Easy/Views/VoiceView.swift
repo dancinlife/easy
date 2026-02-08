@@ -150,7 +150,7 @@ struct VoiceView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
+            } else if vm.isActivated {
                 HStack(spacing: 4) {
                     Image(systemName: "ear")
                         .font(.caption2)
@@ -158,6 +158,14 @@ struct VoiceView: View {
                         .font(.caption)
                 }
                 .foregroundStyle(.green)
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform.badge.mic")
+                        .font(.caption2)
+                    Text("Say \"easy\" to start")
+                        .font(.caption)
+                }
+                .foregroundStyle(.secondary)
             }
         case .thinking:
             HStack(spacing: 4) {

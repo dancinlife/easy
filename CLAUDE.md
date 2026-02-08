@@ -132,16 +132,17 @@ relay/
 ## 핵심 동작 흐름
 
 1. 앱 실행 → Audio Session 활성화 (.playAndRecord)
-2. "듣기 시작" → SFSpeechRecognizer 연속 인식
-3. 침묵 감지 (1.5초) → 인식 텍스트 확정
-4. 모드별 전송:
+2. 패시브 대기 (마이크 ON, "easy" wake word 감지 대기)
+3. "easy" 감지 → ding 알림음 → 액티브 모드 전환
+4. 사용자 발화 → 침묵 감지 (1.5초) → Whisper 인식 → 텍스트 확정
+5. 모드별 전송:
    - **직접**: HTTP POST → Mac의 easy-server → claude --print 실행
    - **Relay**: AES-GCM 암호화 → WebSocket → relay → Mac → claude --print
    - 응답 대기 중에도 마이크 열림 (barge-in)
    - 추가 발화 시 pendingInput에 누적
-5. 응답 수신 (Relay: 복호화) → AVSpeechSynthesizer로 한국어 TTS
+6. 응답 수신 (Relay: 복호화) → OpenAI TTS 재생
    - TTS 중에도 추가 발화 누적 가능
-6. TTS 완료 → pendingInput 있으면 바로 전송, 없으면 다시 듣기 (자동 루프)
+7. TTS 완료 → pendingInput 있으면 바로 전송, 없으면 다시 2번 (패시브 대기)
 
 ## Relay 모드: 키교환 흐름
 
