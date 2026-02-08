@@ -3,49 +3,93 @@ import AVFoundation
 
 @Observable
 @MainActor
-final class TTSService: NSObject, AVSpeechSynthesizerDelegate {
+final class TTSService: NSObject, AVAudioPlayerDelegate {
     var isSpeaking = false
     var onFinished: (() -> Void)?
 
-    private let synthesizer = AVSpeechSynthesizer()
+    private var audioPlayer: AVAudioPlayer?
+    private var currentTask: Task<Void, Never>?
 
-    var speechRate: Float = 0.5
-    var voiceIdentifier: String = "ko-KR"
-
-    override init() {
-        super.init()
-        synthesizer.delegate = self
-    }
+    var apiKey: String?
+    var voice: String = "nova"
 
     func speak(_ text: String) {
         stop()
 
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-        try? session.setActive(true)
-
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: voiceIdentifier)
-        utterance.rate = speechRate
-        utterance.pitchMultiplier = 1.0
-        utterance.volume = 1.0
+        guard let apiKey, !apiKey.isEmpty else {
+            print("[TTS] API 키 미설정")
+            onFinished?()
+            return
+        }
 
         isSpeaking = true
-        synthesizer.speak(utterance)
+
+        currentTask = Task {
+            do {
+                let audioData = try await requestTTS(text: text, apiKey: apiKey)
+                guard !Task.isCancelled else { return }
+                try playAudio(audioData)
+            } catch {
+                guard !Task.isCancelled else { return }
+                print("[TTS] 오류: \(error.localizedDescription)")
+                isSpeaking = false
+                onFinished?()
+            }
+        }
     }
 
     func stop() {
-        synthesizer.stopSpeaking(at: .immediate)
+        currentTask?.cancel()
+        currentTask = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
         isSpeaking = false
     }
 
-    // AVSpeechSynthesizerDelegate
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        // 오디오 세션 모드 유지 확인 (.voiceChat 통일)
+    private func requestTTS(text: String, apiKey: String) async throws -> Data {
+        let url = URL(string: "https://api.openai.com/v1/audio/speech")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "model": "gpt-4o-mini-tts",
+            "input": text,
+            "voice": voice,
+            "instructions": "Speak naturally in the same language as the input text.",
+            "response_format": "mp3"
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "TTS", code: statusCode,
+                          userInfo: [NSLocalizedDescriptionKey: "TTS API 오류 (\(statusCode)): \(body)"])
+        }
+        return data
+    }
+
+    private func playAudio(_ data: Data) throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setActive(true)
+
+        audioPlayer = try AVAudioPlayer(data: data)
+        audioPlayer?.delegate = self
+        audioPlayer?.play()
+    }
+
+    // AVAudioPlayerDelegate
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
 
         Task { @MainActor in
+            self.audioPlayer = nil
             self.isSpeaking = false
             self.onFinished?()
         }

@@ -65,6 +65,14 @@ final class VoiceViewModel {
         set {
             UserDefaults.standard.set(newValue, forKey: "openAIKey")
             Task { await whisper.setAPIKey(newValue) }
+            tts.apiKey = newValue.isEmpty ? nil : newValue
+        }
+    }
+    var ttsVoice: String {
+        get { UserDefaults.standard.string(forKey: "ttsVoice") ?? "nova" }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "ttsVoice")
+            tts.voice = newValue
         }
     }
 
@@ -95,6 +103,8 @@ final class VoiceViewModel {
         speech.sttLanguage = sttLanguage
         speech.whisperService = whisper
         Task { await whisper.setAPIKey(openAIKey) }
+        tts.apiKey = openAIKey.isEmpty ? nil : openAIKey
+        tts.voice = ttsVoice
 
         // 실시간 텍스트 업데이트
         speech.onTextChanged = { [weak self] text in
@@ -136,6 +146,21 @@ final class VoiceViewModel {
         relay.onStateChanged = { [weak self] newState in
             Task { @MainActor in
                 self?.relayState = newState
+            }
+        }
+
+        // 백그라운드 진입 시 음성 중지
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.speech.stopListening()
+            self.tts.stop()
+            self.pendingUtterances.removeAll()
+            self.isProcessing = false
+            if self.status != .idle {
+                self.status = .idle
             }
         }
 
@@ -298,17 +323,21 @@ final class VoiceViewModel {
 
     // MARK: - Relay
 
+    func closeCurrentSession() {
+        guard let id = currentSessionId else { return }
+        stopAll()
+        Task { await relay.sendSessionEnd(sessionId: id) }
+        sessionStore.deleteSession(id: id)
+        currentSessionId = nil
+        messages = []
+    }
+
     func startNewSession(with info: PairingInfo) {
-        // 같은 room의 기존 세션이 있으면 재사용
-        if let existing = sessionStore.sessions.first(where: { $0.room == info.room }) {
-            currentSessionId = existing.id
-        } else {
-            var session = sessionStore.createSession()
-            session.room = info.room
-            sessionStore.updateSession(session)
-            currentSessionId = session.id
-            messages = []
-        }
+        var session = sessionStore.createSession()
+        session.room = info.room
+        sessionStore.updateSession(session)
+        currentSessionId = session.id
+        messages = []
 
         pairedRelayURL = info.relayURL
         pairedRoom = info.room

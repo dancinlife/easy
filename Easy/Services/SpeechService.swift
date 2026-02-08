@@ -29,6 +29,18 @@ final class SpeechService: @unchecked Sendable {
     private let minSpeechDuration: TimeInterval = 0.3  // 최소 발화 길이 (초)
     private var speechStartTime: Date?
 
+    /// Whisper 환각 필터 — 무음/노이즈에서 반복 출력되는 알려진 문구
+    private let hallucinationPhrases: [String] = [
+        "MBC 뉴스", "이덕영입니다", "시청해 주셔서 감사합니다",
+        "구독과 좋아요", "영상이 도움이 되셨다면", "감사합니다",
+        "자막 제공", "한국어 자막", "한글자막", "자막 by",
+        "구독", "좋아요", "알림 설정", "채널에 가입",
+        "you", "thank you", "thanks for watching",
+        "subscribe", "like and subscribe",
+        "sous-titres", "sous-titrage", "Untertitel",
+        "请不吝点赞", "订阅", "小铃铛",
+    ]
+
     func requestPermission() async -> Bool {
         let micStatus = AVAudioApplication.shared.recordPermission
         if micStatus == .undetermined {
@@ -192,6 +204,15 @@ final class SpeechService: @unchecked Sendable {
         let duration = Double(samples.count) / recordingSampleRate
         print("[Speech] 캡처 완료: \(String(format: "%.1f", duration))초, \(samples.count) samples")
 
+        // 오디오 에너지 체크 — 너무 조용하면 Whisper 환각 방지
+        let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
+        let avgDB = 20 * log10(max(rms, 1e-10))
+        if avgDB < -45 {
+            print("[Speech] 평균 dB=\(String(format: "%.1f", avgDB)) 너무 조용, skip")
+            DispatchQueue.main.async { self.onTextChanged?("") }
+            return
+        }
+
         DispatchQueue.main.async {
             self.onTextChanged?("인식 중...")
         }
@@ -211,6 +232,16 @@ final class SpeechService: @unchecked Sendable {
                     DispatchQueue.main.async { self.onTextChanged?("") }
                     return
                 }
+
+                // Whisper 환각 필터
+                let lower = trimmed.lowercased()
+                let isHallucination = self.hallucinationPhrases.contains { lower.contains($0.lowercased()) }
+                if isHallucination {
+                    print("[Speech] 환각 필터: \"\(trimmed)\" → skip")
+                    DispatchQueue.main.async { self.onTextChanged?("") }
+                    return
+                }
+
                 print("[Speech] Whisper 인식: \"\(trimmed)\"")
                 DispatchQueue.main.async {
                     self.onTextChanged?(trimmed)

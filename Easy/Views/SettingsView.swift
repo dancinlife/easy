@@ -26,6 +26,19 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("음성", selection: $vm.ttsVoice) {
+                        Text("Alloy").tag("alloy")
+                        Text("Ash").tag("ash")
+                        Text("Ballad").tag("ballad")
+                        Text("Coral").tag("coral")
+                        Text("Echo").tag("echo")
+                        Text("Fable").tag("fable")
+                        Text("Nova").tag("nova")
+                        Text("Onyx").tag("onyx")
+                        Text("Sage").tag("sage")
+                        Text("Shimmer").tag("shimmer")
+                    }
+
                     Toggle("자동 듣기", isOn: $vm.autoListen)
                 } header: {
                     Text("TTS")

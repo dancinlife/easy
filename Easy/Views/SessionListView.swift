@@ -20,19 +20,10 @@ struct SessionListView: View {
                             .frame(width: 8, height: 8)
 
                         VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(session.name)
-                                    .font(.body)
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
-
-                                if let hostname = session.hostname {
-                                    Text(hostname.replacingOccurrences(of: ".local", with: ""))
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                }
-                            }
+                            Text(session.name)
+                                .font(.body)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
 
                             HStack(spacing: 6) {
                                 if let workDir = session.workDir {
@@ -42,6 +33,11 @@ struct SessionListView: View {
                                 Text(session.createdAt.formatted(.relative(presentation: .named)))
                                 Text("\u{00B7}")
                                 Text("\(session.messages.count)개 메시지")
+
+                                if let hostname = session.hostname {
+                                    Text("\u{00B7}")
+                                    Text(hostname.replacingOccurrences(of: ".local", with: ""))
+                                }
                             }
                             .font(.caption2)
                             .foregroundStyle(.secondary)

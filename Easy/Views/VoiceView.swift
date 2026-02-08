@@ -2,10 +2,11 @@ import SwiftUI
 
 struct VoiceView: View {
     @Bindable var vm: VoiceViewModel
+    @State private var isPulsing = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Messages — 채팅 스타일 (하단 정렬)
+            // Messages
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
@@ -35,25 +36,12 @@ struct VoiceView: View {
             }
 
             // Bottom bar
-            VStack(spacing: 4) {
+            VStack(spacing: 6) {
                 Divider()
 
-                // Status / recognized text
-                if vm.status == .listening && !vm.recognizedText.isEmpty {
-                    Text(vm.recognizedText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                } else if vm.status == .thinking {
-                    Text(vm.recognizedText)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                }
+                // Status text
+                statusText
+                    .padding(.horizontal, 16)
 
                 // Error
                 if let error = vm.error {
@@ -76,38 +64,49 @@ struct VoiceView: View {
 
                     Spacer()
 
+                    // Mic button with pulse animation
                     Button(action: { vm.startListening() }) {
                         ZStack {
+                            // Pulse rings
+                            if vm.status == .listening {
+                                Circle()
+                                    .stroke(micColor.opacity(0.3), lineWidth: 2)
+                                    .frame(width: 72, height: 72)
+                                    .scaleEffect(isPulsing ? 1.3 : 1.0)
+                                    .opacity(isPulsing ? 0 : 0.8)
+
+                                Circle()
+                                    .stroke(micColor.opacity(0.2), lineWidth: 2)
+                                    .frame(width: 72, height: 72)
+                                    .scaleEffect(isPulsing ? 1.6 : 1.0)
+                                    .opacity(isPulsing ? 0 : 0.5)
+                            }
+
                             Circle()
                                 .fill(micColor)
-                                .frame(width: 52, height: 52)
-                                .shadow(color: micColor.opacity(0.4), radius: vm.status == .listening ? 8 : 0)
+                                .frame(width: 56, height: 56)
 
                             Image(systemName: micIcon)
                                 .font(.title3)
                                 .foregroundStyle(.white)
+                                .symbolEffect(.variableColor.iterative, isActive: vm.status == .thinking)
                         }
                     }
                     .disabled(vm.status == .thinking || vm.status == .speaking)
 
                     Spacer()
 
-                    // Relay indicator
-                    HStack(spacing: 3) {
-                        Circle()
-                            .fill(relayDotColor)
-                            .frame(width: 6, height: 6)
-                        Text(relayStatusLabel)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .frame(width: 44, height: 44)
+                    // Status label
+                    Text(statusLabel)
+                        .font(.system(size: 10))
+                        .foregroundStyle(statusLabelColor)
+                        .frame(width: 44, height: 44)
                 }
                 .padding(.horizontal, 12)
             }
             .padding(.bottom, 8)
             .background(.bar)
-            .padding(.bottom, 1) // safe area 여백 확보
+            .padding(.bottom, 1)
         }
         .navigationTitle(currentSessionName)
         .navigationBarTitleDisplayMode(.inline)
@@ -116,6 +115,62 @@ struct VoiceView: View {
             if vm.status == .idle && vm.relayState == .paired {
                 vm.startListening()
             }
+        }
+        .onDisappear {
+            vm.closeCurrentSession()
+        }
+        .onChange(of: vm.status) { _, newStatus in
+            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
+                isPulsing = (newStatus == .listening)
+            }
+            if newStatus != .listening {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isPulsing = false
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusText: some View {
+        switch vm.status {
+        case .idle:
+            Text("탭하여 시작")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        case .listening:
+            if !vm.recognizedText.isEmpty {
+                Text(vm.recognizedText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "ear")
+                        .font(.caption2)
+                    Text("듣고 있어요...")
+                        .font(.caption)
+                }
+                .foregroundStyle(.green)
+            }
+        case .thinking:
+            HStack(spacing: 4) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("생각하는 중...")
+                    .font(.caption)
+            }
+            .foregroundStyle(.orange)
+        case .speaking:
+            HStack(spacing: 4) {
+                Image(systemName: "speaker.wave.2")
+                    .font(.caption2)
+                    .symbolEffect(.variableColor.iterative, isActive: true)
+                Text("말하는 중...")
+                    .font(.caption)
+            }
+            .foregroundStyle(.purple)
         }
     }
 
@@ -145,21 +200,20 @@ struct VoiceView: View {
         }
     }
 
-    private var relayDotColor: Color {
+    private var statusLabel: String {
         switch vm.relayState {
-        case .disconnected: .red
-        case .connecting: .orange
-        case .connected: .yellow
-        case .paired: .green
+        case .disconnected: "끊김"
+        case .connecting: "대기중"
+        case .connected: "대기중"
+        case .paired: "연결됨"
         }
     }
 
-    private var relayStatusLabel: String {
+    private var statusLabelColor: Color {
         switch vm.relayState {
-        case .disconnected: "끊김"
-        case .connecting: "연결중"
-        case .connected: "연결됨"
-        case .paired: "E2E"
+        case .disconnected: .red
+        case .connecting, .connected: .orange
+        case .paired: .green
         }
     }
 }
@@ -181,6 +235,10 @@ struct MessageBubble: View {
 
             if message.role == .assistant { Spacer(minLength: 48) }
         }
+        .transition(.asymmetric(
+            insertion: .move(edge: .bottom).combined(with: .opacity),
+            removal: .opacity
+        ))
     }
 }
 
