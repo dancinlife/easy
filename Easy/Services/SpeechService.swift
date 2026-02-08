@@ -596,7 +596,7 @@ final class SpeechService: @unchecked Sendable {
     private let triggerVariants: Set<String> = [
         // English
         "easy", "eazy", "ease", "eezy", "ezee", "easey",
-        "izi", "izzy", "izy", "isy",
+        "izi", "izzy", "izzi", "izy", "isy",
         "eiji", "ichi", "vijay", "ej", "aj", "eg",
         "ez", "eze", "ezzy",
         // Misrecognitions
@@ -617,7 +617,8 @@ final class SpeechService: @unchecked Sendable {
         for word in words {
             if triggerVariants.contains(word) { return true }
             if word.hasPrefix("eas") || word.hasPrefix("eaz") || word.hasPrefix("eez")
-                || word.hasPrefix("eij") || word.hasPrefix("eig") || word.hasPrefix("eag") {
+                || word.hasPrefix("eij") || word.hasPrefix("eig") || word.hasPrefix("eag")
+                || word.hasPrefix("itch") {
                 return true
             }
         }
