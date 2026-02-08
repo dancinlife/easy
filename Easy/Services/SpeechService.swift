@@ -42,9 +42,9 @@ final class SpeechService: @unchecked Sendable {
 
     private(set) var isListening = false
 
-    /// VAD settings
-    private let speechThresholdDB: Float = -70
-    private let minSpeechDuration: TimeInterval = 0.3
+    /// VAD settings — relative drop detection
+    private let dropThresholdDB: Float = 8  // dB drop from peak = silence
+    private var peakDB: Float = -100
     private var speechStartTime: Date?
 
     /// Watchdog: track last callback time to detect stale recognition
@@ -158,6 +158,7 @@ final class SpeechService: @unchecked Sendable {
         isActivated = false
         isSpeaking = false
         speechStartTime = nil
+        peakDB = -100
 
         bufferLock.lock()
         audioBuffer.removeAll()
@@ -334,31 +335,51 @@ final class SpeechService: @unchecked Sendable {
 
         dbLogCounter += 1
         if dbLogCounter % 50 == 0 {
-            log.debug("dB=\(String(format: "%.1f", db)) threshold=\(self.speechThresholdDB) isSpeaking=\(self.isSpeaking)")
             let dbVal = db
+            let pk = peakDB
             let speaking = isSpeaking
             DispatchQueue.main.async {
-                self.onDebugLog?("active dB=\(String(format: "%.0f", dbVal)) spk=\(speaking)")
+                self.onDebugLog?("dB=\(String(format: "%.0f", dbVal)) pk=\(String(format: "%.0f", pk)) spk=\(speaking)")
             }
         }
 
-        if db > speechThresholdDB {
-            if !isSpeaking {
+        if !isSpeaking {
+            // Not speaking yet — detect speech start when dB rises significantly
+            // Use first few buffers to establish baseline, then detect rise
+            if peakDB < -99 {
+                // First buffer — set baseline
+                peakDB = db
+            } else if db > peakDB + 3 {
+                // Significant rise from baseline = speech started
                 isSpeaking = true
+                peakDB = db
                 speechStartTime = Date()
+                resetSilenceTimer()
                 DispatchQueue.main.async {
                     self.activationTimer?.invalidate()
                     self.activationTimer = nil
                     self.onTextChanged?("Listening...")
                 }
+            } else {
+                // Update baseline (slowly track ambient level)
+                peakDB = peakDB * 0.95 + db * 0.05
+            }
+        } else {
+            // Speaking — track peak and detect drop
+            if db > peakDB {
+                peakDB = db
             }
 
-            bufferLock.lock()
-            audioBuffer.append(contentsOf: samples)
-            bufferLock.unlock()
+            if db < peakDB - dropThresholdDB {
+                // Significant drop — don't reset silence timer (let it expire)
+            } else {
+                // Still speaking — reset silence timer
+                resetSilenceTimer()
+            }
+        }
 
-            resetSilenceTimer()
-        } else if isSpeaking {
+        // Always capture audio once speaking starts
+        if isSpeaking {
             bufferLock.lock()
             audioBuffer.append(contentsOf: samples)
             bufferLock.unlock()
@@ -379,14 +400,14 @@ final class SpeechService: @unchecked Sendable {
     private func captureAndTranscribe() {
         guard isSpeaking else { return }
 
-        if let start = speechStartTime, Date().timeIntervalSince(start) < minSpeechDuration {
-            isSpeaking = false
-            speechStartTime = nil
-            bufferLock.lock()
-            audioBuffer.removeAll()
-            bufferLock.unlock()
-            return
-        }
+        // if let start = speechStartTime, Date().timeIntervalSince(start) < minSpeechDuration {
+        //     isSpeaking = false
+        //     speechStartTime = nil
+        //     bufferLock.lock()
+        //     audioBuffer.removeAll()
+        //     bufferLock.unlock()
+        //     return
+        // }
 
         bufferLock.lock()
         let samples = audioBuffer
@@ -395,6 +416,7 @@ final class SpeechService: @unchecked Sendable {
 
         isSpeaking = false
         speechStartTime = nil
+        peakDB = -100
 
         guard !samples.isEmpty else { return }
 
@@ -403,14 +425,7 @@ final class SpeechService: @unchecked Sendable {
 
         let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
         let avgDB = 20 * log10(max(rms, 1e-10))
-        if avgDB < -70 {
-            log.debug("avgDB=\(String(format: "%.1f", avgDB)) too quiet, skip")
-            DispatchQueue.main.async {
-                self.onTextChanged?("")
-                self.onDebugLog?("skip: too quiet avgDB=\(String(format: "%.0f", avgDB))")
-            }
-            return
-        }
+        log.debug("avgDB=\(String(format: "%.1f", avgDB))")
 
         DispatchQueue.main.async {
             self.onTextChanged?("Recognizing...")
@@ -431,10 +446,14 @@ final class SpeechService: @unchecked Sendable {
                 let text = try await whisper.transcribe(audioData: wavData, language: lang)
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else {
-                    DispatchQueue.main.async { self.onDebugLog?("whisper: empty/filtered") }
-                    self.isActivated = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        self?.restartRecognition()
+                    DispatchQueue.main.async {
+                        self.onDebugLog?("whisper: empty, retry...")
+                        // Stay in active mode — reset and wait for real speech
+                        self.isSpeaking = false
+                        self.speechStartTime = nil
+                        self.bufferLock.lock()
+                        self.audioBuffer.removeAll()
+                        self.bufferLock.unlock()
                     }
                     return
                 }
@@ -444,10 +463,14 @@ final class SpeechService: @unchecked Sendable {
                 let isHallucination = self.hallucinationPhrases.contains { lower.contains($0.lowercased()) }
                 if isHallucination {
                     log.info("Hallucination filter: \"\(trimmed)\" → skip")
-                    DispatchQueue.main.async { self.onDebugLog?("whisper: hallucination \"\(trimmed.prefix(20))\"") }
-                    self.isActivated = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        self?.restartRecognition()
+                    DispatchQueue.main.async {
+                        self.onDebugLog?("whisper: hallucination, retry...")
+                        // Stay in active mode
+                        self.isSpeaking = false
+                        self.speechStartTime = nil
+                        self.bufferLock.lock()
+                        self.audioBuffer.removeAll()
+                        self.bufferLock.unlock()
                     }
                     return
                 }
@@ -477,15 +500,9 @@ final class SpeechService: @unchecked Sendable {
 
     // MARK: - Ding Sound
 
-    /// Stop engine → play ding → restart engine fresh for active mode
+    /// Play ding WITHOUT stopping engine — keeps Bluetooth audio route intact
     func playDing() {
-        // Fully stop engine
-        if let engine = audioEngine, engine.isRunning {
-            engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
-        }
-        audioEngine = nil
-        log.info("Engine stopped for ding")
+        log.info("Playing ding (engine stays running)")
 
         let sampleRate: Double = 44100
         let duration: Double = 0.25
@@ -522,7 +539,6 @@ final class SpeechService: @unchecked Sendable {
                 freq = freq2
                 localT = (t - midpoint) / (duration - midpoint)
             }
-            // Smooth bell envelope: quick attack, gentle decay
             let envelope = sin(.pi * localT) * (1.0 - localT * 0.3)
             let value = sin(2.0 * .pi * freq * t) * envelope * 0.7
             let sample = Int16(max(-1, min(1, value)) * Double(Int16.max))
@@ -536,57 +552,12 @@ final class SpeechService: @unchecked Sendable {
             player.play()
             log.info("Ding playing")
 
-            // Restart engine fresh after ding
+            // Clean up player after playback
             DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.1) { [weak self] in
-                guard let self else { return }
-                self.dingAudioPlayer = nil
-                self.restartEngineForActiveMode()
+                self?.dingAudioPlayer = nil
             }
         } catch {
             log.error("Ding error: \(error)")
-            restartEngineForActiveMode()
-        }
-    }
-
-    /// Create fresh engine for active mode (Whisper recording)
-    private func restartEngineForActiveMode() {
-        let engine = AVAudioEngine()
-        self.audioEngine = engine
-
-        let inputNode = engine.inputNode
-        let nativeFormat = inputNode.outputFormat(forBus: 0)
-        recordingSampleRate = nativeFormat.sampleRate
-
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] buffer, _ in
-            self?.handleAudioTap(buffer)
-        }
-
-        bufferLock.lock()
-        audioBuffer.removeAll()
-        bufferLock.unlock()
-        isSpeaking = false
-        speechStartTime = nil
-
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-            if speakerMode {
-                try audioSession.overrideOutputAudioPort(.speaker)
-            }
-            dbLogCounter = 0
-            engine.prepare()
-            try engine.start()
-            let route = audioSession.currentRoute.inputs.first?.portType.rawValue ?? "unknown"
-            log.info("Engine restarted for active mode, input=\(route), sampleRate=\(self.recordingSampleRate)")
-            DispatchQueue.main.async {
-                self.onDebugLog?("active mode ready (\(route))")
-            }
-        } catch {
-            log.error("Engine restart failed: \(error)")
-            DispatchQueue.main.async {
-                self.onDebugLog?("engine restart FAIL: \(error.localizedDescription.prefix(30))")
-            }
         }
     }
 
