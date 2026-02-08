@@ -518,7 +518,10 @@ async function main() {
   process.on("SIGINT", () => {
     console.log("\n[Exit] Ctrl+C — sending shutdown...");
     connector.sendShutdown();
-    setTimeout(() => process.exit(0), 300);
+    if (connector.ws) {
+      connector.ws.close();
+    }
+    setTimeout(() => process.exit(0), 500);
   });
 }
 

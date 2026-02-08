@@ -58,7 +58,7 @@ final class SessionStore {
             sessions = []
             return
         }
-        sessions = saved.sorted { $0.createdAt > $1.createdAt }
+        sessions = saved
     }
 
     func save() {
@@ -76,6 +76,11 @@ final class SessionStore {
 
     func deleteSession(id: String) {
         sessions.removeAll { $0.id == id }
+        save()
+    }
+
+    func moveSessions(from source: IndexSet, to destination: Int) {
+        sessions.move(fromOffsets: source, toOffset: destination)
         save()
     }
 

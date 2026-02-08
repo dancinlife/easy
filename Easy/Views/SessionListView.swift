@@ -55,6 +55,9 @@ struct SessionListView: View {
                     vm.deleteSession(id: session.id)
                 }
             }
+            .onMove { source, destination in
+                vm.sessionStore.moveSessions(from: source, to: destination)
+            }
         }
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 44)
@@ -70,6 +73,9 @@ struct SessionListView: View {
         .navigationTitle("Easy")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                EditButton()
+            }
             ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 12) {
                     Button { showQRScanner = true } label: {
