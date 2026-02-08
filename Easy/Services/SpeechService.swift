@@ -431,9 +431,11 @@ final class SpeechService: @unchecked Sendable {
                 let text = try await whisper.transcribe(audioData: wavData, language: lang)
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else {
-                    DispatchQueue.main.async { self.onDebugLog?("whisper: empty result") }
+                    DispatchQueue.main.async { self.onDebugLog?("whisper: empty/filtered") }
                     self.isActivated = false
-                    self.restartRecognition()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        self?.restartRecognition()
+                    }
                     return
                 }
 
@@ -444,7 +446,9 @@ final class SpeechService: @unchecked Sendable {
                     log.info("Hallucination filter: \"\(trimmed)\" → skip")
                     DispatchQueue.main.async { self.onDebugLog?("whisper: hallucination \"\(trimmed.prefix(20))\"") }
                     self.isActivated = false
-                    self.restartRecognition()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        self?.restartRecognition()
+                    }
                     return
                 }
 
@@ -460,10 +464,13 @@ final class SpeechService: @unchecked Sendable {
             } catch {
                 log.error("Whisper error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
-                    self.onDebugLog?("whisper ERR: \(error.localizedDescription.prefix(40))")
+                    self.onDebugLog?("whisper ERR: \(error.localizedDescription.prefix(60))")
                 }
                 self.isActivated = false
-                self.restartRecognition()
+                // Delay restart so user can read error
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                    self?.restartRecognition()
+                }
             }
         }
     }
@@ -590,7 +597,7 @@ final class SpeechService: @unchecked Sendable {
         // English
         "easy", "eazy", "ease", "eezy", "ezee", "easey",
         "izi", "izzy", "izy", "isy",
-        "eiji", "ichi", "ej", "aj", "eg",
+        "eiji", "ichi", "vijay", "ej", "aj", "eg",
         "ez", "eze", "ezzy",
         // Misrecognitions
         "eating", "is it", "e z", "e g",

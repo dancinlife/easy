@@ -54,22 +54,19 @@ actor WhisperService {
 
         let result = try JSONDecoder().decode(VerboseWhisperResponse.self, from: data)
 
-        // Filter noise using segment-level metrics
+        // Filter noise using segment-level metrics (relaxed for LTE/speaker)
         if let seg = result.segments?.first {
-            log.info("Whisper: \"\(result.text)\" no_speech=\(String(format: "%.2f", seg.no_speech_prob)) logprob=\(String(format: "%.2f", seg.avg_logprob)) compress=\(String(format: "%.1f", seg.compression_ratio))")
+            log.info("Whisper: \"\(result.text)\" ns=\(String(format: "%.2f", seg.no_speech_prob)) lp=\(String(format: "%.2f", seg.avg_logprob)) cr=\(String(format: "%.1f", seg.compression_ratio))")
 
-            // High no_speech_prob = likely not real speech (threshold per OpenAI paper: 0.6)
-            if seg.no_speech_prob > 0.6 {
+            if seg.no_speech_prob > 0.8 {
                 log.info("skip: no_speech_prob \(String(format: "%.2f", seg.no_speech_prob))")
                 return ""
             }
-            // Very low avg_logprob = poor recognition quality
-            if seg.avg_logprob < -1.0 {
+            if seg.avg_logprob < -1.5 {
                 log.info("skip: avg_logprob \(String(format: "%.2f", seg.avg_logprob))")
                 return ""
             }
-            // High compression ratio = repetitive hallucination
-            if seg.compression_ratio > 2.4 {
+            if seg.compression_ratio > 3.0 {
                 log.info("skip: compression_ratio \(String(format: "%.1f", seg.compression_ratio))")
                 return ""
             }
