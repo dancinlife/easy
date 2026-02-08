@@ -3,28 +3,26 @@ import AVFoundation
 
 @Observable
 @MainActor
-final class TTSService {
+final class TTSService: NSObject, AVSpeechSynthesizerDelegate {
     var isSpeaking = false
+    var onFinished: (() -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
-    private let delegate = TTSDelegate()
-    var onFinished: (() -> Void)?
 
     var speechRate: Float = 0.5
     var voiceIdentifier: String = "ko-KR"
 
-    init() {
-        synthesizer.delegate = delegate
-        delegate.onFinish = { [weak self] in
-            Task { @MainActor in
-                self?.isSpeaking = false
-                self?.onFinished?()
-            }
-        }
+    override init() {
+        super.init()
+        synthesizer.delegate = self
     }
 
     func speak(_ text: String) {
-        synthesizer.stopSpeaking(at: .immediate)
+        stop()
+
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+        try? session.setActive(true)
 
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: voiceIdentifier)
@@ -40,12 +38,16 @@ final class TTSService {
         synthesizer.stopSpeaking(at: .immediate)
         isSpeaking = false
     }
-}
 
-private final class TTSDelegate: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
-    var onFinish: (() -> Void)?
+    // AVSpeechSynthesizerDelegate
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        // 오디오 세션 모드 유지 확인 (.voiceChat 통일)
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
 
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        onFinish?()
+        Task { @MainActor in
+            self.isSpeaking = false
+            self.onFinished?()
+        }
     }
 }

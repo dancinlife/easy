@@ -14,4 +14,6 @@ build/
 __pycache__/
 *.pyc
 server/easy-server
+server/easy-server-relay
+server/package-lock.json
 node_modules/

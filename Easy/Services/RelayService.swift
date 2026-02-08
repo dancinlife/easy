@@ -7,8 +7,9 @@ actor RelayService {
     private var urlSession: URLSession?
     private var sessionKey: SymmetricKey?
     private var pairingInfo: PairingInfo?
+    private var connectionId: Int = 0
 
-    private var pendingContinuation: CheckedContinuation<String, Error>?
+    private var pendingTextContinuation: CheckedContinuation<String, Error>?
 
     enum RelayError: LocalizedError {
         case notConnected
@@ -37,6 +38,12 @@ actor RelayService {
         case paired
     }
 
+    struct ServerInfo: Sendable {
+        let workDir: String
+        let hostname: String
+    }
+
+    nonisolated(unsafe) var onServerInfo: (@Sendable (ServerInfo) -> Void)?
     nonisolated(unsafe) var onStateChanged: (@Sendable (ConnectionState) -> Void)?
     private(set) var state: ConnectionState = .disconnected {
         didSet {
@@ -50,10 +57,17 @@ actor RelayService {
 
     init() {}
 
-    /// QR 코드에서 파싱한 정보로 relay에 연결 + 키교환
     func connect(with info: PairingInfo) async throws {
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        sessionKey = nil
+        connectionId += 1
+        let myConnectionId = connectionId
+
         self.pairingInfo = info
         state = .connecting
+
+        print("[RelayService] 연결 시작: \(info.relayURL) room: \(info.room)")
 
         urlSession = URLSession(configuration: .default)
 
@@ -65,19 +79,22 @@ actor RelayService {
         webSocketTask = urlSession?.webSocketTask(with: url)
         webSocketTask?.resume()
 
+        try await Task.sleep(for: .milliseconds(500))
+        guard connectionId == myConnectionId else { return }
+
         state = .connected
 
-        // Room 참가
         let joinMsg: [String: Any] = ["type": "join", "room": info.room]
         try await sendJSON(joinMsg)
 
-        // 수신 루프 시작
-        startReceiveLoop()
+        startReceiveLoop(connectionId: myConnectionId)
+        startPingLoop(connectionId: myConnectionId)
 
-        // 키교환 수행
         try await performKeyExchange(serverPublicKey: info.serverPublicKey)
 
+        guard connectionId == myConnectionId else { return }
         state = .paired
+        print("[RelayService] 페어링 완료")
     }
 
     func disconnect() {
@@ -87,55 +104,70 @@ actor RelayService {
         state = .disconnected
     }
 
-    var isConnected: Bool {
-        state == .paired
-    }
+    var isConnected: Bool { state == .paired }
 
-    /// 질문 전송 + 응답 수신 (E2E 암호화)
-    func ask(question: String, workDir: String?) async throws -> String {
+    /// 텍스트 전송 + 응답 수신 (E2E 암호화)
+    func askText(text: String, sessionId: String? = nil) async throws -> String {
         guard let sessionKey else {
             throw RelayError.notPaired
         }
 
-        // 질문 JSON 생성
-        var questionJSON: [String: Any] = ["question": question]
-        if let workDir, !workDir.isEmpty {
-            questionJSON["workDir"] = workDir
+        var payload: [String: Any] = ["text": text]
+        if let sessionId {
+            payload["sessionId"] = sessionId
         }
 
-        // 암호화
-        let plainData = try JSONSerialization.data(withJSONObject: questionJSON)
+        let plainData = try JSONSerialization.data(withJSONObject: payload)
         let sealed = try AES.GCM.seal(plainData, using: sessionKey)
         let encryptedBase64 = sealed.combined!.base64URLEncoded()
 
-        // 전송
         let msg: [String: Any] = [
             "type": "message",
             "payload": [
-                "type": "ask",
+                "type": "ask_text",
                 "encrypted": encryptedBase64
             ] as [String: Any]
         ]
         try await sendJSON(msg)
 
-        // 응답 대기 (최대 120초)
         return try await withCheckedThrowingContinuation { continuation in
-            self.pendingContinuation = continuation
+            self.pendingTextContinuation = continuation
 
-            // 타임아웃
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(120))
-                await self?.handleTimeout()
+                await self?.handleTextTimeout()
             }
+        }
+    }
+
+    func sendSessionEnd(sessionId: String) async {
+        guard let sessionKey else { return }
+        do {
+            let payload: [String: Any] = ["sessionId": sessionId]
+            let plainData = try JSONSerialization.data(withJSONObject: payload)
+            let sealed = try AES.GCM.seal(plainData, using: sessionKey)
+            let encryptedBase64 = sealed.combined!.base64URLEncoded()
+
+            let msg: [String: Any] = [
+                "type": "message",
+                "payload": [
+                    "type": "session_end",
+                    "encrypted": encryptedBase64
+                ] as [String: Any]
+            ]
+            try await sendJSON(msg)
+            print("[RelayService] session_end 전송: \(sessionId)")
+        } catch {
+            print("[RelayService] session_end 전송 실패: \(error)")
         }
     }
 
     // MARK: - Private
 
-    private func handleTimeout() {
-        if pendingContinuation != nil {
-            pendingContinuation?.resume(throwing: RelayError.timeout)
-            pendingContinuation = nil
+    private func handleTextTimeout() {
+        if pendingTextContinuation != nil {
+            pendingTextContinuation?.resume(throwing: RelayError.timeout)
+            pendingTextContinuation = nil
         }
     }
 
@@ -152,7 +184,6 @@ actor RelayService {
             outputByteCount: 32
         )
 
-        // 랜덤 세션키 생성
         let sessionKeyData = SymmetricKey(size: .bits256)
         let sessionKeyRaw = sessionKeyData.withUnsafeBytes { Data($0) }
 
@@ -170,21 +201,41 @@ actor RelayService {
         try await sendJSON(keyExMsg)
 
         self.sessionKey = sessionKeyData
-
         try await Task.sleep(for: .milliseconds(500))
     }
 
-    private func startReceiveLoop() {
+    private func startPingLoop(connectionId: Int) {
         Task { [weak self] in
-            await self?.receiveLoop()
+            while true {
+                try? await Task.sleep(for: .seconds(15))
+                guard let self else { return }
+                guard await self.connectionId == connectionId else { return }
+                await self.sendPing()
+            }
         }
     }
 
-    private func receiveLoop() async {
-        guard let webSocketTask else { return }
+    private func sendPing() {
+        webSocketTask?.sendPing { error in
+            if let error {
+                print("[RelayService] ping 실패: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func startReceiveLoop(connectionId: Int) {
+        Task { [weak self] in
+            await self?.receiveLoop(connectionId: connectionId)
+        }
+    }
+
+    private func receiveLoop(connectionId: Int) async {
+        guard self.connectionId == connectionId,
+              let webSocketTask else { return }
 
         do {
             let message = try await webSocketTask.receive()
+            guard self.connectionId == connectionId else { return }
             switch message {
             case .string(let text):
                 handleMessage(text)
@@ -195,16 +246,17 @@ actor RelayService {
             @unknown default:
                 break
             }
-            // 계속 수신
-            await receiveLoop()
+            await receiveLoop(connectionId: connectionId)
         } catch {
+            guard self.connectionId == connectionId else { return }
             if state != .disconnected {
                 state = .connecting
-                // 재접속
                 Task { [weak self] in
                     try? await Task.sleep(for: .seconds(3))
-                    if let info = await self?.pairingInfo {
-                        try? await self?.connect(with: info)
+                    guard let self else { return }
+                    guard await self.connectionId == connectionId else { return }
+                    if let info = await self.pairingInfo {
+                        try? await self.connect(with: info)
                     }
                 }
             }
@@ -219,18 +271,14 @@ actor RelayService {
         switch type {
         case "joined":
             state = .connected
-
         case "peer_joined":
             break
-
         case "peer_left":
             sessionKey = nil
             state = .connected
-
         case "message":
             guard let payload = json["payload"] as? [String: Any] else { return }
             handlePayload(payload)
-
         default:
             break
         }
@@ -243,12 +291,39 @@ actor RelayService {
         case "key_exchange_ack":
             state = .paired
 
-        case "answer":
+        case "server_info":
+            guard let sessionKey,
+                  let encryptedBase64 = payload["encrypted"] as? String,
+                  let encryptedData = Data(base64URLEncoded: encryptedBase64) else { return }
+
+            do {
+                let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+                let plainData = try AES.GCM.open(sealedBox, using: sessionKey)
+
+                guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
+                      let workDir = json["workDir"] as? String,
+                      let hostname = json["hostname"] as? String else { return }
+
+                let info = ServerInfo(workDir: workDir, hostname: hostname)
+                print("[RelayService] server_info 수신: workDir=\(workDir) hostname=\(hostname)")
+                let callback = onServerInfo
+                Task { @MainActor in
+                    callback?(info)
+                }
+            } catch {
+                print("[RelayService] server_info 복호화 실패: \(error)")
+            }
+
+        case "server_shutdown":
+            print("[RelayService] server_shutdown 수신")
+            state = .disconnected
+
+        case "text_answer":
             guard let sessionKey,
                   let encryptedBase64 = payload["encrypted"] as? String,
                   let encryptedData = Data(base64URLEncoded: encryptedBase64) else {
-                pendingContinuation?.resume(throwing: RelayError.invalidResponse)
-                pendingContinuation = nil
+                pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
+                pendingTextContinuation = nil
                 return
             }
 
@@ -258,16 +333,16 @@ actor RelayService {
 
                 guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
                       let answer = json["answer"] as? String else {
-                    pendingContinuation?.resume(throwing: RelayError.invalidResponse)
-                    pendingContinuation = nil
+                    pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
+                    pendingTextContinuation = nil
                     return
                 }
 
-                pendingContinuation?.resume(returning: answer.trimmingCharacters(in: .whitespacesAndNewlines))
-                pendingContinuation = nil
+                pendingTextContinuation?.resume(returning: answer.trimmingCharacters(in: .whitespacesAndNewlines))
+                pendingTextContinuation = nil
             } catch {
-                pendingContinuation?.resume(throwing: RelayError.decryptionFailed)
-                pendingContinuation = nil
+                pendingTextContinuation?.resume(throwing: RelayError.decryptionFailed)
+                pendingTextContinuation = nil
             }
 
         default:

@@ -1,0 +1,25 @@
+{
+  "name": "easy-server",
+  "version": "2.0.0",
+  "description": "Claude Code voice interface — hands-free coding via iPhone + AirPods",
+  "main": "index.js",
+  "bin": {
+    "easy": "bin/easy.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["claude", "voice", "coding", "hands-free"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dancinlife/easy.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.16.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

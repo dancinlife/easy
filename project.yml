@@ -8,7 +8,7 @@ options:
 
 settings:
   SWIFT_VERSION: "6.0"
-  DEVELOPMENT_TEAM: ""
+  DEVELOPMENT_TEAM: "4Z6TFQZ78C"
   CODE_SIGN_STYLE: Automatic
 
 targets:
