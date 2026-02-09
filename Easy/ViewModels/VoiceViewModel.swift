@@ -295,21 +295,18 @@ final class VoiceViewModel {
 
     // MARK: - Voice Commands
 
-    private static let clearKeywords = ["clear", "new conversation", "reset conversation", "대화 초기화", "클리어", "새 대화"]
-    private static let compactKeywords = ["compact", "대화 정리", "컴팩트"]
-    private static let summarizeKeywords = ["summarize", "summary", "대화 요약", "요약해"]
+    private static let clearKeywords = ["clear", "new conversation", "reset conversation", "대화 초기화", "세션 초기화", "클리어", "새 대화"]
+    private static let compactKeywords = ["compact", "summarize", "summary", "대화 정리", "대화 요약", "세션 요약", "컴팩트", "요약해"]
 
     private enum VoiceCommand {
         case clear
         case compact
-        case summarize
     }
 
     private func detectVoiceCommand(_ text: String) -> VoiceCommand? {
         let lower = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if Self.clearKeywords.contains(where: { lower.contains($0) }) { return .clear }
         if Self.compactKeywords.contains(where: { lower.contains($0) }) { return .compact }
-        if Self.summarizeKeywords.contains(where: { lower.contains($0) }) { return .summarize }
         return nil
     }
 
@@ -365,12 +362,6 @@ final class VoiceViewModel {
 
         case .compact:
             await performCompact()
-
-        case .summarize:
-            guard currentSessionId != nil else { return }
-            log.info("Voice command: summarize")
-            let summarizePrompt = sttLanguage == "ko" ? "지금까지 대화를 간결하게 요약해줘." : "Briefly summarize our conversation so far."
-            await sendToServer(summarizePrompt)
         }
     }
 
