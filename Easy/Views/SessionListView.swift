@@ -21,10 +21,17 @@ struct SessionListView: View {
                             .frame(width: 8, height: 8)
 
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(session.name)
-                                .font(.body)
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                Text(session.name)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                if session.isPinned {
+                                    Image(systemName: "pin.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
 
                             if let lastMsg = session.messages.last {
                                 Text(lastMsg.text)
@@ -47,6 +54,14 @@ struct SessionListView: View {
                             .foregroundStyle(.secondary)
                         }
                     }
+                }
+                .swipeActions(edge: .leading) {
+                    Button {
+                        vm.sessionStore.togglePin(id: session.id)
+                    } label: {
+                        Image(systemName: session.isPinned ? "pin.slash" : "pin")
+                    }
+                    .tint(.orange)
                 }
             }
             .onDelete { indexSet in

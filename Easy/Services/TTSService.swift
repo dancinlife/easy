@@ -12,33 +12,26 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
 
     private var audioPlayer: AVAudioPlayer?
     private var currentTask: Task<Void, Never>?
+    private var sentenceQueue: [String] = []
+    private var isPlayingFromQueue = false
 
     var apiKey: String?
     var voice: String = "nova"
     var speed: Double = 1.0
 
+    /// Speak entire text at once (legacy, wraps enqueueSentence)
     func speak(_ text: String) {
         stop()
+        enqueueSentence(text)
+    }
 
-        guard let apiKey, !apiKey.isEmpty else {
-            log.warning("API key not set")
-            onFinished?()
-            return
-        }
-
-        isSpeaking = true
-
-        currentTask = Task {
-            do {
-                let audioData = try await requestTTS(text: text, apiKey: apiKey)
-                guard !Task.isCancelled else { return }
-                try playAudio(audioData)
-            } catch {
-                guard !Task.isCancelled else { return }
-                log.error("Error: \(error.localizedDescription)")
-                isSpeaking = false
-                onFinished?()
-            }
+    /// Enqueue a sentence for TTS playback. Starts immediately if idle.
+    func enqueueSentence(_ sentence: String) {
+        let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        sentenceQueue.append(trimmed)
+        if !isPlayingFromQueue {
+            playNextInQueue()
         }
     }
 
@@ -47,6 +40,8 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
         currentTask = nil
         audioPlayer?.stop()
         audioPlayer = nil
+        sentenceQueue.removeAll()
+        isPlayingFromQueue = false
         isSpeaking = false
     }
 
@@ -84,12 +79,46 @@ final class TTSService: NSObject, AVAudioPlayerDelegate {
         audioPlayer?.play()
     }
 
+    private func playNextInQueue() {
+        guard let apiKey, !apiKey.isEmpty else {
+            log.warning("API key not set")
+            sentenceQueue.removeAll()
+            isPlayingFromQueue = false
+            isSpeaking = false
+            onFinished?()
+            return
+        }
+
+        guard !sentenceQueue.isEmpty else {
+            isPlayingFromQueue = false
+            isSpeaking = false
+            onFinished?()
+            return
+        }
+
+        isPlayingFromQueue = true
+        isSpeaking = true
+        let sentence = sentenceQueue.removeFirst()
+
+        currentTask = Task {
+            do {
+                let audioData = try await requestTTS(text: sentence, apiKey: apiKey)
+                guard !Task.isCancelled else { return }
+                try playAudio(audioData)
+            } catch {
+                guard !Task.isCancelled else { return }
+                log.error("Error: \(error.localizedDescription)")
+                // Try next sentence on error
+                playNextInQueue()
+            }
+        }
+    }
+
     // AVAudioPlayerDelegate
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in
             self.audioPlayer = nil
-            self.isSpeaking = false
-            self.onFinished?()
+            self.playNextInQueue()
         }
     }
 }

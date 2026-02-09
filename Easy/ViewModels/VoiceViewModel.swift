@@ -223,9 +223,11 @@ final class VoiceViewModel {
                 let newWorkDir = (info.workDir as NSString).expandingTildeInPath
                 session.workDir = newWorkDir
                 let basename = (newWorkDir as NSString).lastPathComponent
-                log.info("server_info: workDir=\(info.workDir) → basename=\(basename)")
+                log.info("server_info: workDir=\(info.workDir) → basename=\(basename) title=\(info.title ?? "nil")")
                 self.debugLog = "workDir: \(info.workDir)"
-                if !basename.isEmpty {
+                if let title = info.title, !title.isEmpty {
+                    session.name = title
+                } else if !basename.isEmpty {
                     session.name = basename
                 }
                 self.sessionStore.updateSession(session)
@@ -273,10 +275,42 @@ final class VoiceViewModel {
         }
     }
 
+    // MARK: - Voice Commands
+
+    private static let clearKeywords = ["clear", "new conversation", "reset conversation", "대화 초기화", "클리어", "새 대화"]
+    private static let compactKeywords = ["compact", "대화 정리", "컴팩트"]
+    private static let summarizeKeywords = ["summarize", "summary", "대화 요약", "요약해"]
+
+    private enum VoiceCommand {
+        case clear
+        case compact
+        case summarize
+    }
+
+    private func detectVoiceCommand(_ text: String) -> VoiceCommand? {
+        let lower = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.clearKeywords.contains(where: { lower.contains($0) }) { return .clear }
+        if Self.compactKeywords.contains(where: { lower.contains($0) }) { return .compact }
+        if Self.summarizeKeywords.contains(where: { lower.contains($0) }) { return .summarize }
+        return nil
+    }
+
     // MARK: - Utterance Queue (mcp-voice-hooks pattern)
 
     private func handleUtterance(_ text: String) {
         isActivated = false
+
+        // Check for voice commands before queueing
+        if let command = detectVoiceCommand(text) {
+            if status == .speaking {
+                tts.stop()
+            }
+            pendingUtterances.removeAll()
+            isProcessing = false
+            Task { await executeVoiceCommand(command) }
+            return
+        }
+
         pendingUtterances.append(text)
 
         if status == .speaking {
@@ -287,6 +321,39 @@ final class VoiceViewModel {
 
         if !isProcessing {
             processNextUtterance()
+        }
+    }
+
+    private func executeVoiceCommand(_ command: VoiceCommand) async {
+        switch command {
+        case .clear:
+            guard let sid = currentSessionId else { return }
+            log.info("Voice command: clear session \(sid)")
+            await relay.sendSessionClear(sessionId: sid)
+            newSession()
+            status = .speaking
+            tts.speak(sttLanguage == "ko" ? "대화를 초기화했습니다." : "Conversation cleared.")
+            do {
+                try speech.startListening()
+            } catch {
+                log.error("mic restart after clear: \(error)")
+            }
+
+        case .compact:
+            guard currentSessionId != nil else { return }
+            log.info("Voice command: compact")
+            let compactPrompt = sttLanguage == "ko" ? "지금까지 대화를 간결하게 요약해줘." : "Briefly summarize our conversation so far."
+            await sendToServer(compactPrompt)
+            if let sid = currentSessionId {
+                await relay.sendSessionClear(sessionId: sid)
+                newSession()
+            }
+
+        case .summarize:
+            guard currentSessionId != nil else { return }
+            log.info("Voice command: summarize")
+            let summarizePrompt = sttLanguage == "ko" ? "지금까지 대화를 간결하게 요약해줘." : "Briefly summarize our conversation so far."
+            await sendToServer(summarizePrompt)
         }
     }
 
@@ -319,33 +386,63 @@ final class VoiceViewModel {
         }
 
         do {
-            let answer = try await relay.askText(
+            var fullText = ""
+            var startedSpeaking = false
+
+            let stream = await relay.askTextStreaming(
                 text: text,
                 sessionId: currentSessionId
             )
 
-            // Ignore if session already closed
-            guard currentSessionId != nil else {
-                log.warning("session closed!")
-                return
+            for try await event in stream {
+                guard currentSessionId != nil else {
+                    log.warning("session closed!")
+                    return
+                }
+
+                switch event {
+                case .chunk(let sentence, let index):
+                    log.info("chunk[\(index)]: \(sentence.prefix(40))")
+                    fullText += (fullText.isEmpty ? "" : " ") + sentence
+
+                    // Start TTS + mic on first chunk
+                    if !startedSpeaking {
+                        startedSpeaking = true
+                        status = .speaking
+                        updateActivity(status: .speaking, text: String(sentence.prefix(100)))
+                        do {
+                            try speech.startListening()
+                        } catch {
+                            log.error("mic restart during TTS: \(error)")
+                        }
+                    }
+                    tts.enqueueSentence(sentence)
+
+                case .done(let text):
+                    log.info("done: \(text.prefix(40))")
+                    // Use full text from server if no chunks were received
+                    if fullText.isEmpty {
+                        fullText = text
+                        // No chunks came, play entire text
+                        status = .speaking
+                        updateActivity(status: .speaking, text: String(text.prefix(100)))
+                        tts.enqueueSentence(text)
+                        do {
+                            try speech.startListening()
+                        } catch {
+                            log.error("mic restart during TTS: \(error)")
+                        }
+                    }
+                }
             }
 
-            log.info("resp: \(answer.prefix(30))")
+            // Save assistant response
+            let answer = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !answer.isEmpty else { return }
 
-            // Assistant response
             messages.append(Message(role: .assistant, text: answer))
             if let sid = currentSessionId {
                 sessionStore.appendMessage(sessionId: sid, message: .init(role: .assistant, text: answer))
-            }
-
-            // TTS playback + restart mic for wake word barge-in
-            status = .speaking
-            updateActivity(status: .speaking, text: String(answer.prefix(100)))
-            tts.speak(answer)
-            do {
-                try speech.startListening()
-            } catch {
-                log.error("mic restart during TTS: \(error)")
             }
         } catch {
             guard currentSessionId != nil else { return }

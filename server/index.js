@@ -32,12 +32,19 @@ if (relayIdx !== -1 && args[relayIdx + 1]) {
   relayURL = args[relayIdx + 1];
 }
 
-if (args.includes("--help") || args.includes("-h")) {
+let sessionTitle = null;
+const titleIdx = args.indexOf("--title");
+if (titleIdx !== -1 && args[titleIdx + 1]) {
+  sessionTitle = args[titleIdx + 1];
+}
+
+if (args.includes("--help") || args.includes("-help") || args.includes("--h") || args.includes("-h")) {
   console.log(`Easy — Claude Code Voice Interface
 
 Usage:
   easy                          Start with default relay
   easy --relay <url>            Specify custom relay server
+  easy --title <name>           Set custom session title
   easy --new                    Generate new pairing key
   easy --help                   Show help`);
   process.exit(0);
@@ -165,12 +172,12 @@ function deriveSharedKey(privateKey, peerPublicKeyRaw) {
 let claudeQueue = Promise.resolve();
 const activeSessions = new Set(); // track already created sessions
 
-function runClaude(question, sessionId) {
+function runClaude(question, sessionId, onSentence) {
   const job = claudeQueue.then(async () => {
-    const result = await _runClaudeOnce(question, sessionId);
+    const result = await _runClaudeOnce(question, sessionId, onSentence);
     if (result === null && sessionId) {
       console.log("[Claude] Session failed — retrying without session");
-      return _runClaudeOnce(question, null);
+      return _runClaudeOnce(question, null, onSentence);
     }
     return result;
   });
@@ -178,7 +185,24 @@ function runClaude(question, sessionId) {
   return job;
 }
 
-function _runClaudeOnce(question, sessionId) {
+// Sentence boundary detection: split on ., !, ?, 。 followed by space/newline/end
+function extractSentences(buffer) {
+  // Match sentence-ending punctuation followed by whitespace or end of string
+  const pattern = /([^.!?。]*[.!?。])(?:\s|$)/g;
+  const sentences = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = pattern.exec(buffer)) !== null) {
+    sentences.push(buffer.slice(lastIndex, match.index + match[1].length).trim());
+    lastIndex = match.index + match[0].length;
+  }
+
+  const remainder = buffer.slice(lastIndex);
+  return { sentences, remainder };
+}
+
+function _runClaudeOnce(question, sessionId, onSentence) {
   return new Promise((resolve) => {
     const args = ["--print"];
     if (sessionId) {
@@ -188,6 +212,7 @@ function _runClaudeOnce(question, sessionId) {
         args.push("--session-id", sessionId);
       }
     }
+    args.push("--output-format", "stream-json", "--verbose");
     args.push("--append-system-prompt", "You are being used via a voice interface (TTS). Keep responses concise and conversational. No markdown, no code blocks, no bullet points. Speak naturally as if talking to a developer. When explaining code changes, describe what you did briefly instead of showing code.");
     args.push(question);
 
@@ -204,10 +229,50 @@ function _runClaudeOnce(question, sessionId) {
 
     child.stdin.end();
 
-    let stdout = "";
+    let fullText = "";
+    let sentenceBuffer = "";
+    let sentenceIndex = 0;
     let stderr = "";
+    let lineBuffer = "";
 
-    child.stdout.on("data", (data) => { stdout += data.toString(); });
+    child.stdout.on("data", (data) => {
+      lineBuffer += data.toString();
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() || ""; // keep incomplete line
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+
+          if (event.type === "content_block_delta" && event.delta?.text) {
+            const text = event.delta.text;
+            fullText += text;
+            sentenceBuffer += text;
+
+            // Extract complete sentences
+            const { sentences, remainder } = extractSentences(sentenceBuffer);
+            sentenceBuffer = remainder;
+
+            for (const sentence of sentences) {
+              if (sentence.trim()) {
+                console.log(`[Stream] sentence[${sentenceIndex}]: ${sentence.slice(0, 60)}`);
+                if (onSentence) onSentence(sentence.trim(), sentenceIndex);
+                sentenceIndex++;
+              }
+            }
+          }
+
+          // Extract session_id from result event
+          if (event.type === "result" && event.session_id && sessionId) {
+            activeSessions.add(sessionId);
+          }
+        } catch {
+          // Not JSON, ignore
+        }
+      }
+    });
+
     child.stderr.on("data", (data) => { stderr += data.toString(); });
 
     const timer = setTimeout(() => {
@@ -218,12 +283,20 @@ function _runClaudeOnce(question, sessionId) {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+
+      // Flush remaining buffer
+      if (sentenceBuffer.trim()) {
+        console.log(`[Stream] sentence[${sentenceIndex}] (flush): ${sentenceBuffer.slice(0, 60)}`);
+        if (onSentence) onSentence(sentenceBuffer.trim(), sentenceIndex);
+      }
+
       if (code !== 0) {
         console.log(`[Claude] Error: exit=${code} stderr=${stderr.slice(0, 200)}`);
       } else if (sessionId) {
         activeSessions.add(sessionId);
       }
-      const answer = stdout.trim();
+
+      const answer = fullText.trim();
       resolve(answer || null);
     });
 
@@ -341,6 +414,9 @@ class RelayConnector {
       case "session_end":
         this.handleSessionEnd(payload);
         break;
+      case "session_clear":
+        this.handleSessionClear(payload);
+        break;
       case "key_exchange_ack":
         break;
     }
@@ -377,10 +453,11 @@ class RelayConnector {
     if (!this.sessionKey) return;
     try {
       const info = { type: "server_info", workDir: process.cwd(), hostname: os.hostname() };
+      if (sessionTitle) info.title = sessionTitle;
       const plain = Buffer.from(JSON.stringify(info));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
       this.send({ type: "message", payload: { type: "server_info", encrypted: base64url(encrypted) } });
-      console.log(`[Relay] server_info sent: workDir=${info.workDir} hostname=${info.hostname}`);
+      console.log(`[Relay] server_info sent: workDir=${info.workDir} hostname=${info.hostname}${sessionTitle ? ` title=${sessionTitle}` : ""}`);
     } catch (err) {
       console.log(`[Error] server_info send failed: ${err.message}`);
     }
@@ -430,14 +507,17 @@ class RelayConnector {
 
       console.log(`[Question] "${text}" (session: ${sessionId || "none"})`);
 
-      // Run Claude
-      console.log("[Claude] Running...");
-      const answer = (await runClaude(text, sessionId)) || "Error: claude execution failed";
+      // Run Claude with streaming
+      console.log("[Claude] Running (streaming)...");
+      const onSentence = (sentence, index) => {
+        this.sendTextStream(sentence, index);
+      };
+      const answer = (await runClaude(text, sessionId, onSentence)) || "Error: claude execution failed";
       console.log(`[Answer] ${answer.slice(0, 100)}${answer.length > 100 ? "..." : ""}`);
 
-      // Send response
-      this.sendTextAnswer(answer);
-      console.log("[Done] Response sent");
+      // Send done signal with full text
+      this.sendTextDone(answer);
+      console.log("[Done] Streaming response complete");
     } catch (err) {
       console.log(`[Error] Text processing failed: ${err.message}`);
       try {
@@ -460,6 +540,21 @@ class RelayConnector {
     }
   }
 
+  handleSessionClear(payload) {
+    if (!this.sessionKey) return;
+    try {
+      const encryptedData = fromBase64url(payload.encrypted);
+      const plainData = aesGcmDecrypt(encryptedData, this.sessionKey);
+      const json = JSON.parse(plainData.toString());
+      const sid = json.sessionId;
+      console.log(`[Session] session_clear received: sessionId=${sid || "unknown"}`);
+      if (sid) activeSessions.delete(sid);
+      this.sendTextAnswer("cleared");
+    } catch (err) {
+      console.log(`[Error] session_clear processing failed: ${err.message}`);
+    }
+  }
+
   sendTextAnswer(answer) {
     if (!this.sessionKey) return;
 
@@ -476,6 +571,44 @@ class RelayConnector {
       });
     } catch (err) {
       console.log(`[Error] Response encryption failed: ${err.message}`);
+    }
+  }
+
+  sendTextStream(chunk, index) {
+    if (!this.sessionKey) return;
+
+    try {
+      const plain = Buffer.from(JSON.stringify({ chunk, index }));
+      const encrypted = aesGcmEncrypt(plain, this.sessionKey);
+
+      this.send({
+        type: "message",
+        payload: {
+          type: "text_stream",
+          encrypted: base64url(encrypted),
+        },
+      });
+    } catch (err) {
+      console.log(`[Error] Stream chunk encryption failed: ${err.message}`);
+    }
+  }
+
+  sendTextDone(fullText) {
+    if (!this.sessionKey) return;
+
+    try {
+      const plain = Buffer.from(JSON.stringify({ fullText }));
+      const encrypted = aesGcmEncrypt(plain, this.sessionKey);
+
+      this.send({
+        type: "message",
+        payload: {
+          type: "text_done",
+          encrypted: base64url(encrypted),
+        },
+      });
+    } catch (err) {
+      console.log(`[Error] Stream done encryption failed: ${err.message}`);
     }
   }
 }

@@ -13,6 +13,12 @@ actor RelayService {
     private var connectionId: Int = 0
 
     private var pendingTextContinuation: CheckedContinuation<String, Error>?
+    private var streamContinuation: AsyncThrowingStream<StreamEvent, Error>.Continuation?
+
+    enum StreamEvent: Sendable {
+        case chunk(String, Int)  // sentence, index
+        case done(String)        // full text
+    }
 
     enum RelayError: LocalizedError {
         case notConnected
@@ -44,6 +50,7 @@ actor RelayService {
     struct ServerInfo: Sendable {
         let workDir: String
         let hostname: String
+        let title: String?
     }
 
     nonisolated(unsafe) var onServerInfo: (@Sendable (ServerInfo) -> Void)?
@@ -154,6 +161,84 @@ actor RelayService {
                 try? await Task.sleep(for: .seconds(120))
                 await self?.handleTextTimeout()
             }
+        }
+    }
+
+    /// Send text + receive streamed response (E2E encrypted)
+    func askTextStreaming(text: String, sessionId: String? = nil) -> AsyncThrowingStream<StreamEvent, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                guard let sessionKey = self.sessionKey else {
+                    continuation.finish(throwing: RelayError.notPaired)
+                    return
+                }
+
+                self.streamContinuation = continuation
+
+                var payload: [String: Any] = ["text": text]
+                if let sessionId {
+                    payload["sessionId"] = sessionId
+                }
+
+                do {
+                    let plainData = try JSONSerialization.data(withJSONObject: payload)
+                    let sealed = try AES.GCM.seal(plainData, using: sessionKey)
+                    let encryptedBase64 = sealed.combined!.base64URLEncoded()
+
+                    let msg: [String: Any] = [
+                        "type": "message",
+                        "payload": [
+                            "type": "ask_text",
+                            "encrypted": encryptedBase64
+                        ] as [String: Any]
+                    ]
+                    try await self.sendJSON(msg)
+
+                    // Timeout
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(120))
+                        guard let self else { return }
+                        let cont = await self.streamContinuation
+                        if cont != nil {
+                            await self.finishStream(throwing: RelayError.timeout)
+                        }
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
+                    self.streamContinuation = nil
+                }
+            }
+        }
+    }
+
+    private func finishStream(throwing error: Error? = nil) {
+        if let error {
+            streamContinuation?.finish(throwing: error)
+        } else {
+            streamContinuation?.finish()
+        }
+        streamContinuation = nil
+    }
+
+    func sendSessionClear(sessionId: String) async {
+        guard let sessionKey else { return }
+        do {
+            let payload: [String: Any] = ["sessionId": sessionId]
+            let plainData = try JSONSerialization.data(withJSONObject: payload)
+            let sealed = try AES.GCM.seal(plainData, using: sessionKey)
+            let encryptedBase64 = sealed.combined!.base64URLEncoded()
+
+            let msg: [String: Any] = [
+                "type": "message",
+                "payload": [
+                    "type": "session_clear",
+                    "encrypted": encryptedBase64
+                ] as [String: Any]
+            ]
+            try await sendJSON(msg)
+            log.info("session_clear sent: \(sessionId)")
+        } catch {
+            log.error("session_clear send failed: \(error)")
         }
     }
 
@@ -324,8 +409,9 @@ actor RelayService {
                       let workDir = json["workDir"] as? String,
                       let hostname = json["hostname"] as? String else { return }
 
-                let info = ServerInfo(workDir: workDir, hostname: hostname)
-                log.info("server_info received: workDir=\(workDir) hostname=\(hostname)")
+                let title = json["title"] as? String
+                let info = ServerInfo(workDir: workDir, hostname: hostname, title: title)
+                log.info("server_info received: workDir=\(workDir) hostname=\(hostname) title=\(title ?? "nil")")
                 let callback = onServerInfo
                 Task { @MainActor in
                     callback?(info)
@@ -359,14 +445,59 @@ actor RelayService {
             log.notice("server_shutdown received")
             state = .disconnected
 
+        case "text_stream":
+            guard let sessionKey,
+                  let encryptedBase64 = payload["encrypted"] as? String,
+                  let encryptedData = Data(base64URLEncoded: encryptedBase64) else { return }
+
+            do {
+                let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+                let plainData = try AES.GCM.open(sealedBox, using: sessionKey)
+
+                guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
+                      let chunk = json["chunk"] as? String,
+                      let index = json["index"] as? Int else { return }
+
+                log.info("text_stream chunk[\(index)]: \(chunk.prefix(40))")
+                streamContinuation?.yield(.chunk(chunk, index))
+            } catch {
+                log.error("text_stream decryption failed: \(error)")
+            }
+
+        case "text_done":
+            guard let sessionKey,
+                  let encryptedBase64 = payload["encrypted"] as? String,
+                  let encryptedData = Data(base64URLEncoded: encryptedBase64) else { return }
+
+            do {
+                let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+                let plainData = try AES.GCM.open(sealedBox, using: sessionKey)
+
+                guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
+                      let fullText = json["fullText"] as? String else { return }
+
+                log.info("text_done: \(fullText.prefix(50))")
+                streamContinuation?.yield(.done(fullText.trimmingCharacters(in: .whitespacesAndNewlines)))
+                streamContinuation?.finish()
+                streamContinuation = nil
+            } catch {
+                log.error("text_done decryption failed: \(error)")
+                streamContinuation?.finish(throwing: RelayError.decryptionFailed)
+                streamContinuation = nil
+            }
+
         case "text_answer":
-            log.info("text_answer received, sessionKey=\(self.sessionKey != nil), continuation=\(self.pendingTextContinuation != nil)")
+            // Legacy fallback: non-streaming response
+            log.info("text_answer received, sessionKey=\(self.sessionKey != nil)")
             guard let sessionKey,
                   let encryptedBase64 = payload["encrypted"] as? String,
                   let encryptedData = Data(base64URLEncoded: encryptedBase64) else {
                 log.error("text_answer guard failed")
                 pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                 pendingTextContinuation = nil
+                // Also finish stream if active
+                streamContinuation?.finish(throwing: RelayError.invalidResponse)
+                streamContinuation = nil
                 return
             }
 
@@ -379,16 +510,29 @@ actor RelayService {
                     log.error("text_answer JSON parse failed")
                     pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                     pendingTextContinuation = nil
+                    streamContinuation?.finish(throwing: RelayError.invalidResponse)
+                    streamContinuation = nil
                     return
                 }
 
-                log.info("text_answer decrypted: \(answer.prefix(50))")
-                pendingTextContinuation?.resume(returning: answer.trimmingCharacters(in: .whitespacesAndNewlines))
-                pendingTextContinuation = nil
+                let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+                log.info("text_answer decrypted: \(trimmed.prefix(50))")
+
+                // If streaming is active, deliver as done event
+                if streamContinuation != nil {
+                    streamContinuation?.yield(.done(trimmed))
+                    streamContinuation?.finish()
+                    streamContinuation = nil
+                } else {
+                    pendingTextContinuation?.resume(returning: trimmed)
+                    pendingTextContinuation = nil
+                }
             } catch {
                 log.error("text_answer decryption failed: \(error)")
                 pendingTextContinuation?.resume(throwing: RelayError.decryptionFailed)
                 pendingTextContinuation = nil
+                streamContinuation?.finish(throwing: RelayError.decryptionFailed)
+                streamContinuation = nil
             }
 
         default:
