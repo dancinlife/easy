@@ -172,12 +172,12 @@ function deriveSharedKey(privateKey, peerPublicKeyRaw) {
 let claudeQueue = Promise.resolve();
 const activeSessions = new Set(); // track already created sessions
 
-function runClaude(question, sessionId, onSentence) {
+function runClaude(question, sessionId, onSentence, compactSummary) {
   const job = claudeQueue.then(async () => {
-    const result = await _runClaudeOnce(question, sessionId, onSentence);
-    if (result === null && sessionId) {
+    const result = await _runClaudeOnce(question, sessionId, onSentence, compactSummary);
+    if (result.text === null && sessionId) {
       console.log("[Claude] Session failed — retrying without session");
-      return _runClaudeOnce(question, null, onSentence);
+      return _runClaudeOnce(question, null, onSentence, compactSummary);
     }
     return result;
   });
@@ -202,7 +202,9 @@ function extractSentences(buffer) {
   return { sentences, remainder };
 }
 
-function _runClaudeOnce(question, sessionId, onSentence) {
+const AUTO_COMPACT_THRESHOLD = 150000; // tokens — trigger auto-compact at 75% of 200K
+
+function _runClaudeOnce(question, sessionId, onSentence, compactSummary) {
   return new Promise((resolve) => {
     const args = ["--print"];
     if (sessionId) {
@@ -213,7 +215,11 @@ function _runClaudeOnce(question, sessionId, onSentence) {
       }
     }
     args.push("--output-format", "stream-json", "--verbose");
-    args.push("--append-system-prompt", "You are being used via a voice interface (TTS). Keep responses concise and conversational. No markdown, no code blocks, no bullet points. Speak naturally as if talking to a developer. When explaining code changes, describe what you did briefly instead of showing code.");
+    let systemPrompt = "You are being used via a voice interface (TTS). Keep responses concise and conversational. No markdown, no code blocks, no bullet points. Speak naturally as if talking to a developer. When explaining code changes, describe what you did briefly instead of showing code.";
+    if (compactSummary) {
+      systemPrompt += "\n\nContext from previous conversation:\n" + compactSummary;
+    }
+    args.push("--append-system-prompt", systemPrompt);
     args.push(question);
 
     console.log(`[Claude] claude ${args.join(" ").slice(0, 100)}`);
@@ -234,6 +240,7 @@ function _runClaudeOnce(question, sessionId, onSentence) {
     let sentenceIndex = 0;
     let stderr = "";
     let lineBuffer = "";
+    let inputTokens = 0;
 
     child.stdout.on("data", (data) => {
       lineBuffer += data.toString();
@@ -263,9 +270,10 @@ function _runClaudeOnce(question, sessionId, onSentence) {
             }
           }
 
-          // Extract session_id from result event
-          if (event.type === "result" && event.session_id && sessionId) {
-            activeSessions.add(sessionId);
+          // Extract session_id and usage from result event
+          if (event.type === "result") {
+            if (event.session_id && sessionId) activeSessions.add(sessionId);
+            if (event.usage) inputTokens = event.usage.input_tokens || 0;
           }
         } catch {
           // Not JSON, ignore
@@ -278,7 +286,7 @@ function _runClaudeOnce(question, sessionId, onSentence) {
     const timer = setTimeout(() => {
       console.log("[Claude] Timeout: 120s exceeded, killing process");
       child.kill("SIGTERM");
-      resolve(null);
+      resolve({ text: null, inputTokens: 0 });
     }, 120_000);
 
     child.on("close", (code) => {
@@ -297,13 +305,14 @@ function _runClaudeOnce(question, sessionId, onSentence) {
       }
 
       const answer = fullText.trim();
-      resolve(answer || null);
+      console.log(`[Claude] Usage: inputTokens=${inputTokens}`);
+      resolve({ text: answer || null, inputTokens });
     });
 
     child.on("error", (err) => {
       clearTimeout(timer);
       console.log(`[Claude] Error: ${err.message}`);
-      resolve(null);
+      resolve({ text: null, inputTokens: 0 });
     });
   });
 }
@@ -333,6 +342,7 @@ class RelayConnector {
     this.publicKeyRaw = publicKeyRaw;
     this.sessionKey = null;
     this.ws = null;
+    this.pendingCompactSummary = null;
   }
 
   connect() {
@@ -416,6 +426,9 @@ class RelayConnector {
         break;
       case "session_clear":
         this.handleSessionClear(payload);
+        break;
+      case "session_compact":
+        this.handleSessionCompact(payload);
         break;
       case "key_exchange_ack":
         break;
@@ -512,12 +525,24 @@ class RelayConnector {
       const onSentence = (sentence, index) => {
         this.sendTextStream(sentence, index);
       };
-      const answer = (await runClaude(text, sessionId, onSentence)) || "Error: claude execution failed";
+      const compactSummary = this.pendingCompactSummary;
+      if (compactSummary) {
+        console.log(`[Compact] Injecting summary (${compactSummary.length} chars)`);
+        this.pendingCompactSummary = null;
+      }
+      const result = await runClaude(text, sessionId, onSentence, compactSummary);
+      const answer = result.text || "Error: claude execution failed";
       console.log(`[Answer] ${answer.slice(0, 100)}${answer.length > 100 ? "..." : ""}`);
 
       // Send done signal with full text
       this.sendTextDone(answer);
       console.log("[Done] Streaming response complete");
+
+      // Auto-compact detection
+      if (result.inputTokens > AUTO_COMPACT_THRESHOLD) {
+        console.log(`[Compact] Token usage ${result.inputTokens} > ${AUTO_COMPACT_THRESHOLD} — sending compact_needed`);
+        this.sendCompactNeeded(sessionId, result.inputTokens);
+      }
     } catch (err) {
       console.log(`[Error] Text processing failed: ${err.message}`);
       try {
@@ -549,9 +574,39 @@ class RelayConnector {
       const sid = json.sessionId;
       console.log(`[Session] session_clear received: sessionId=${sid || "unknown"}`);
       if (sid) activeSessions.delete(sid);
-      this.sendTextAnswer("cleared");
     } catch (err) {
       console.log(`[Error] session_clear processing failed: ${err.message}`);
+    }
+  }
+
+  handleSessionCompact(payload) {
+    if (!this.sessionKey) return;
+    try {
+      const encryptedData = fromBase64url(payload.encrypted);
+      const plainData = aesGcmDecrypt(encryptedData, this.sessionKey);
+      const json = JSON.parse(plainData.toString());
+      const sid = json.sessionId;
+      const summary = json.summary;
+      console.log(`[Session] session_compact received: sessionId=${sid || "unknown"} summary=${(summary || "").slice(0, 80)}`);
+      if (sid) activeSessions.delete(sid);
+      this.pendingCompactSummary = summary || null;
+      console.log(`[Compact] Summary stored (${(summary || "").length} chars) — will inject in next request`);
+    } catch (err) {
+      console.log(`[Error] session_compact processing failed: ${err.message}`);
+    }
+  }
+
+  sendCompactNeeded(sessionId, inputTokens) {
+    if (!this.sessionKey) return;
+    try {
+      const plain = Buffer.from(JSON.stringify({ sessionId, inputTokens }));
+      const encrypted = aesGcmEncrypt(plain, this.sessionKey);
+      this.send({
+        type: "message",
+        payload: { type: "compact_needed", encrypted: base64url(encrypted) },
+      });
+    } catch (err) {
+      console.log(`[Error] compact_needed send failed: ${err.message}`);
     }
   }
 

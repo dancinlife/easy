@@ -26,6 +26,7 @@ final class VoiceViewModel {
     // Utterance Queue (mcp-voice-hooks pattern)
     private var pendingUtterances: [String] = []
     private var isProcessing = false
+    private var autoCompactPending = false
 
     // Live Activity
     private var currentActivity: Activity<EasyActivityAttributes>?
@@ -204,6 +205,14 @@ final class VoiceViewModel {
                 // Skip if barge-in already took over
                 guard !self.isActivated else { return }
                 self.isProcessing = false
+
+                // Auto-compact if pending and queue is empty
+                if self.autoCompactPending && self.pendingUtterances.isEmpty {
+                    self.autoCompactPending = false
+                    Task { await self.performCompact() }
+                    return
+                }
+
                 if self.pendingUtterances.isEmpty {
                     self.startListening()
                 } else {
@@ -243,6 +252,15 @@ final class VoiceViewModel {
                     self.stopAll()
                     self.currentSessionId = self.sessionStore.sessions.first?.id
                 }
+            }
+        }
+
+        relay.onCompactNeeded = { [weak self] sessionId in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.currentSessionId == sessionId else { return }
+                log.notice("auto-compact needed for session \(sessionId)")
+                self.autoCompactPending = true
             }
         }
 
@@ -330,6 +348,12 @@ final class VoiceViewModel {
             guard let sid = currentSessionId else { return }
             log.info("Voice command: clear session \(sid)")
             await relay.sendSessionClear(sessionId: sid)
+            messages = []
+            if let session = sessionStore.sessions.first(where: { $0.id == sid }) {
+                var cleared = session
+                cleared.messages = []
+                sessionStore.updateSession(cleared)
+            }
             newSession()
             status = .speaking
             tts.speak(sttLanguage == "ko" ? "대화를 초기화했습니다." : "Conversation cleared.")
@@ -340,14 +364,7 @@ final class VoiceViewModel {
             }
 
         case .compact:
-            guard currentSessionId != nil else { return }
-            log.info("Voice command: compact")
-            let compactPrompt = sttLanguage == "ko" ? "지금까지 대화를 간결하게 요약해줘." : "Briefly summarize our conversation so far."
-            await sendToServer(compactPrompt)
-            if let sid = currentSessionId {
-                await relay.sendSessionClear(sessionId: sid)
-                newSession()
-            }
+            await performCompact()
 
         case .summarize:
             guard currentSessionId != nil else { return }
@@ -355,6 +372,30 @@ final class VoiceViewModel {
             let summarizePrompt = sttLanguage == "ko" ? "지금까지 대화를 간결하게 요약해줘." : "Briefly summarize our conversation so far."
             await sendToServer(summarizePrompt)
         }
+    }
+
+    private func performCompact() async {
+        guard let oldSid = currentSessionId else { return }
+        log.info("Compact: summarizing session \(oldSid)")
+
+        let compactPrompt = sttLanguage == "ko"
+            ? "지금까지 대화를 간결하게 요약해줘."
+            : "Briefly summarize our conversation so far."
+
+        let summary = await sendToServer(compactPrompt)
+
+        guard let summary, !summary.isEmpty else {
+            log.warning("Compact: no summary received")
+            return
+        }
+
+        // Send compact with summary to server (will inject into next session)
+        await relay.sendSessionCompact(sessionId: oldSid, summary: summary)
+
+        // Clear iOS messages and start new session
+        messages = []
+        newSession()
+        log.info("Compact: done — summary (\(summary.count) chars) stored for next session")
     }
 
     private func processNextUtterance() {
@@ -371,7 +412,8 @@ final class VoiceViewModel {
         }
     }
 
-    private func sendToServer(_ text: String) async {
+    @discardableResult
+    private func sendToServer(_ text: String) async -> String? {
         ensureSession()
         speech.stopListening()
         status = .thinking
@@ -397,7 +439,7 @@ final class VoiceViewModel {
             for try await event in stream {
                 guard currentSessionId != nil else {
                     log.warning("session closed!")
-                    return
+                    return nil
                 }
 
                 switch event {
@@ -438,14 +480,15 @@ final class VoiceViewModel {
 
             // Save assistant response
             let answer = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !answer.isEmpty else { return }
+            guard !answer.isEmpty else { return nil }
 
             messages.append(Message(role: .assistant, text: answer))
             if let sid = currentSessionId {
                 sessionStore.appendMessage(sessionId: sid, message: .init(role: .assistant, text: answer))
             }
+            return answer
         } catch {
-            guard currentSessionId != nil else { return }
+            guard currentSessionId != nil else { return nil }
             log.error("ERR: \(error.localizedDescription.prefix(50))")
             self.error = error.localizedDescription
             isProcessing = false
@@ -455,6 +498,7 @@ final class VoiceViewModel {
                 status = .idle
                 endActivity()
             }
+            return nil
         }
     }
 

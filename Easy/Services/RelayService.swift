@@ -56,6 +56,7 @@ actor RelayService {
     nonisolated(unsafe) var onServerInfo: (@Sendable (ServerInfo) -> Void)?
     nonisolated(unsafe) var onStateChanged: (@Sendable (ConnectionState) -> Void)?
     nonisolated(unsafe) var onSessionEnd: (@Sendable (String) -> Void)?
+    nonisolated(unsafe) var onCompactNeeded: (@Sendable (String) -> Void)?
     private(set) var state: ConnectionState = .disconnected {
         didSet {
             let callback = onStateChanged
@@ -239,6 +240,28 @@ actor RelayService {
             log.info("session_clear sent: \(sessionId)")
         } catch {
             log.error("session_clear send failed: \(error)")
+        }
+    }
+
+    func sendSessionCompact(sessionId: String, summary: String) async {
+        guard let sessionKey else { return }
+        do {
+            let payload: [String: Any] = ["sessionId": sessionId, "summary": summary]
+            let plainData = try JSONSerialization.data(withJSONObject: payload)
+            let sealed = try AES.GCM.seal(plainData, using: sessionKey)
+            let encryptedBase64 = sealed.combined!.base64URLEncoded()
+
+            let msg: [String: Any] = [
+                "type": "message",
+                "payload": [
+                    "type": "session_compact",
+                    "encrypted": encryptedBase64
+                ] as [String: Any]
+            ]
+            try await sendJSON(msg)
+            log.info("session_compact sent: \(sessionId) summary=\(summary.prefix(50))")
+        } catch {
+            log.error("session_compact send failed: \(error)")
         }
     }
 
@@ -444,6 +467,28 @@ actor RelayService {
         case "server_shutdown":
             log.notice("server_shutdown received")
             state = .disconnected
+
+        case "compact_needed":
+            guard let sessionKey,
+                  let encryptedBase64 = payload["encrypted"] as? String,
+                  let encryptedData = Data(base64URLEncoded: encryptedBase64) else { return }
+
+            do {
+                let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+                let plainData = try AES.GCM.open(sealedBox, using: sessionKey)
+
+                guard let json = try JSONSerialization.jsonObject(with: plainData) as? [String: Any],
+                      let sessionId = json["sessionId"] as? String else { return }
+
+                let inputTokens = json["inputTokens"] as? Int ?? 0
+                log.notice("compact_needed: session=\(sessionId) tokens=\(inputTokens)")
+                let callback = onCompactNeeded
+                Task { @MainActor in
+                    callback?(sessionId)
+                }
+            } catch {
+                log.error("compact_needed decryption failed: \(error)")
+            }
 
         case "text_stream":
             guard let sessionKey,
