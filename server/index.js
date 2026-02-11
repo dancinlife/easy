@@ -252,12 +252,34 @@ function _runClaudeOnce(question, sessionId, onSentence, compactSummary) {
         try {
           const event = JSON.parse(line);
 
+          // New format (CLI 2.x): full assistant message
+          if (event.type === "assistant" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === "text" && block.text) {
+                fullText += block.text;
+                sentenceBuffer += block.text;
+              }
+            }
+
+            // Extract complete sentences
+            const { sentences, remainder } = extractSentences(sentenceBuffer);
+            sentenceBuffer = remainder;
+
+            for (const sentence of sentences) {
+              if (sentence.trim()) {
+                console.log(`[Stream] sentence[${sentenceIndex}]: ${sentence.slice(0, 60)}`);
+                if (onSentence) onSentence(sentence.trim(), sentenceIndex);
+                sentenceIndex++;
+              }
+            }
+          }
+
+          // Legacy format: streaming deltas
           if (event.type === "content_block_delta" && event.delta?.text) {
             const text = event.delta.text;
             fullText += text;
             sentenceBuffer += text;
 
-            // Extract complete sentences
             const { sentences, remainder } = extractSentences(sentenceBuffer);
             sentenceBuffer = remainder;
 
@@ -274,6 +296,10 @@ function _runClaudeOnce(question, sessionId, onSentence, compactSummary) {
           if (event.type === "result") {
             if (event.session_id && sessionId) activeSessions.add(sessionId);
             if (event.usage) inputTokens = event.usage.input_tokens || 0;
+            // Fallback: if no text captured from assistant/delta events
+            if (!fullText && event.result) {
+              fullText = event.result;
+            }
           }
         } catch {
           // Not JSON, ignore

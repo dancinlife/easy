@@ -427,14 +427,12 @@ final class SpeechService: @unchecked Sendable {
     private func captureAndTranscribe() {
         guard isSpeaking else { return }
 
-        // if let start = speechStartTime, Date().timeIntervalSince(start) < minSpeechDuration {
-        //     isSpeaking = false
-        //     speechStartTime = nil
-        //     bufferLock.lock()
-        //     audioBuffer.removeAll()
-        //     bufferLock.unlock()
-        //     return
-        // }
+        // Cancel activation timer immediately — we have audio to process,
+        // don't let it fire during the Whisper API call
+        DispatchQueue.main.async {
+            self.activationTimer?.invalidate()
+            self.activationTimer = nil
+        }
 
         bufferLock.lock()
         let samples = audioBuffer

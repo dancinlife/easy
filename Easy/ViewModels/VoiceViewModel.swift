@@ -331,10 +331,11 @@ final class VoiceViewModel {
         if status == .speaking {
             // Barge-in: stop TTS + process new utterance
             tts.stop()
-            status = .listening
         }
 
         if !isProcessing {
+            // Set thinking immediately to avoid "say easy" flash
+            status = .thinking
             processNextUtterance()
         }
     }
