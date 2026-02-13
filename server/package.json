@@ -1,6 +1,6 @@
 {
   "name": "easy-server",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Claude Code voice interface — hands-free coding via iPhone + AirPods",
   "main": "index.js",
   "bin": {
@@ -19,7 +19,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "ws": "^8.16.0",
+    "socket.io-client": "^4.7.0",
     "qrcode-terminal": "^0.12.0"
   }
 }

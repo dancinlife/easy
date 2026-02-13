@@ -8,13 +8,13 @@ Talk to Claude Code while driving, walking, or doing anything with your hands bu
 
 ```
 iPhone (Easy app)                 Relay Server              Mac (easy server)
-    |                          (WebSocket relay)                   |
-    |-- wss:// (E2E encrypted) --> room-based relay <-- wss:// ---|
-    |                                                              |
-    |-- QR scan (easy://pair)              <-- Terminal QR code ---|
-    |                                                              |
-    |  STT: OpenAI Whisper API                   claude --print    |
-    |  TTS: OpenAI gpt-4o-mini-tts              (runs locally)    |
+    |                          (Socket.IO relay)                    |
+    |-- Socket.IO (E2E encrypted) -> room relay <-- Socket.IO -----|
+    |                                                               |
+    |-- QR scan (easy://pair)              <-- Terminal QR code ----|
+    |                                                               |
+    |  STT: OpenAI Whisper API                   claude --print     |
+    |  TTS: OpenAI gpt-4o-mini-tts              (runs locally)     |
 ```
 
 1. Run `easy` on your Mac — a QR code appears in terminal
@@ -26,12 +26,15 @@ iPhone (Easy app)                 Relay Server              Mac (easy server)
 
 - **Wake Word**: Say "easy" to activate — like "Hey Siri" for Claude Code
 - **E2E Encryption**: Curve25519 ECDH key exchange + AES-256-GCM for all messages
+- **Auto-Reconnect**: Socket.IO handles WiFi↔LTE transitions seamlessly
 - **Barge-in**: Interrupt TTS mid-speech with a new voice command
-- **Session Management**: Multiple sessions, auto-cleanup on server disconnect
+- **Streaming**: Sentence-by-sentence TTS playback as Claude responds
+- **Session Management**: Multiple sessions, auto-compact, voice commands (clear/compact)
 - **OpenAI Whisper STT**: Accurate transcription with hallucination filtering
 - **OpenAI TTS**: Natural speech with gpt-4o-mini-tts (10 voice options)
-- **Background Handling**: Auto-pause on background, reconnect on foreground
-- **No VPN Required**: Works over any network via WebSocket relay
+- **Live Activity**: Shows status on lock screen and Dynamic Island
+- **CarPlay**: Basic CarPlay support
+- **No VPN Required**: Works over any network via Socket.IO relay
 
 ## Quick Start
 
@@ -51,8 +54,9 @@ This connects to the default relay server and displays a QR code.
 
 Options:
 ```bash
-easy --relay wss://your-relay.fly.dev   # Custom relay server
-easy --new                               # Generate new pairing key
+easy --relay wss://your-relay.example.com  # Custom relay server
+easy --title "my-project"                   # Set session title
+easy --new                                  # Generate new pairing key
 ```
 
 ### 3. iPhone App
@@ -90,7 +94,7 @@ xcodebuild -scheme Easy \
 cd relay
 npm install
 npm start
-# Listens on ws://0.0.0.0:8080
+# Socket.IO server on port 8080
 ```
 
 ## Architecture
@@ -100,15 +104,18 @@ npm start
 ```
 Easy/
 ├── EasyApp.swift              # App entry + URL scheme handler
+├── CarPlay/
+│   └── CarPlaySceneDelegate.swift  # CarPlay support
 ├── Models/
 │   ├── Message.swift          # Chat message model
 │   ├── PairingInfo.swift      # QR pairing data + Base64URL
-│   └── Session.swift          # Session model + SessionStore
+│   ├── Session.swift          # Session model + SessionStore
+│   └── EasyActivity.swift     # Live Activity model
 ├── Services/
-│   ├── RelayService.swift     # WebSocket + E2E encryption (actor)
+│   ├── RelayService.swift     # Socket.IO + E2E encryption (actor)
 │   ├── SpeechService.swift    # VAD + audio capture + Whisper STT
 │   ├── WhisperService.swift   # OpenAI Whisper API client (actor)
-│   └── TTSService.swift       # OpenAI TTS API + AVAudioPlayer
+│   └── TTSService.swift       # OpenAI TTS + AVAudioPlayer
 ├── ViewModels/
 │   └── VoiceViewModel.swift   # Main business logic + utterance queue
 └── Views/
@@ -116,14 +123,26 @@ Easy/
     ├── SessionListView.swift  # Session list + QR scanner
     ├── SettingsView.swift     # API key, voice, language settings
     └── QRScannerView.swift    # Camera QR scanner
+
+EasyWidget/
+├── EasyLiveActivity.swift     # Live Activity UI
+└── EasyWidgetBundle.swift     # Widget bundle
 ```
 
 ### Server (Node.js)
 
 ```
 server/
-├── index.js                   # CLI entry + relay connector + Claude runner
-└── package.json
+├── index.js                   # Socket.IO client + Claude runner
+└── package.json               # socket.io-client, qrcode-terminal
+```
+
+### Relay (Node.js)
+
+```
+relay/
+├── server.js                  # Socket.IO relay server
+└── package.json               # socket.io
 ```
 
 ### Key Exchange Flow
@@ -147,10 +166,10 @@ Both:    All subsequent messages encrypted with session key (AES-256-GCM)
 
 ## Tech Stack
 
-- Swift 6 / SwiftUI (zero dependencies — iOS frameworks only)
+- Swift 6 / SwiftUI + socket.io-client-swift (SPM)
 - CryptoKit (Curve25519 ECDH + AES-GCM)
 - AVFoundation (audio capture + playback)
-- Node.js + ws (server + relay)
+- Node.js + Socket.IO (server + relay)
 
 ## Settings
 
@@ -160,7 +179,9 @@ Both:    All subsequent messages encrypted with session key (AES-256-GCM)
 | Language | STT input language (en/ko) | en |
 | Silence Detection | Seconds of silence before capture | 1.5s |
 | Voice | TTS voice (10 options) | nova |
-| Auto Listen | Resume listening after TTS | on |
+| TTS Speed | Playback speed | 1.0 |
+| Speaker Mode | Route audio to speaker | off |
+| Theme | App theme (system/light/dark) | system |
 
 ## License
 

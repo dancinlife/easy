@@ -1,7 +1,6 @@
 import ActivityKit
 import AVFoundation
 import Foundation
-import Network
 import os
 import SwiftUI
 import UIKit
@@ -125,7 +124,6 @@ final class VoiceViewModel {
     var tts = TTSService()
     private let relay = RelayService()
     private let whisper = WhisperService()
-    private var networkMonitor: NWPathMonitor?
 
     enum Status {
         case idle
@@ -325,20 +323,6 @@ final class VoiceViewModel {
                 self.restorePairingIfNeeded()
             }
         }
-
-        // Auto-reconnect on network change (WiFi ↔ LTE)
-        let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
-            Task { @MainActor in
-                guard let self else { return }
-                if path.status == .satisfied && self.relayState != .paired {
-                    log.info("Network path changed → satisfied, attempting reconnect")
-                    Task { await self.relay.reconnectIfNeeded() }
-                }
-            }
-        }
-        monitor.start(queue: DispatchQueue(label: "com.ghost.easy.network-monitor"))
-        self.networkMonitor = monitor
     }
 
     // MARK: - Voice Commands

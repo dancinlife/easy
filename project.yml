@@ -6,6 +6,11 @@ options:
   xcodeVersion: "26.2"
   groupSortPosition: top
 
+packages:
+  SocketIO:
+    url: https://github.com/socketio/socket.io-client-swift
+    from: "16.1.1"
+
 settings:
   SWIFT_VERSION: "6.0"
   DEVELOPMENT_TEAM: "4Z6TFQZ78C"
@@ -31,6 +36,8 @@ targets:
     dependencies:
       - target: EasyWidget
         embed: true
+      - package: SocketIO
+        product: SocketIO
 
   EasyWidget:
     type: app-extension

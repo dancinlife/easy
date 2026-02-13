@@ -5,59 +5,80 @@ import os
 
 private let log = Logger(subsystem: "com.ghost.easy", category: "speech")
 
+// MARK: - Voice Flow State Machine
+
+enum VoiceFlowState: String {
+    case idle          // Engine off
+    case passive       // SFSpeech wake word listening
+    case activated     // Wake word detected, waiting for speech (owns activationTimer)
+    case capturing     // VAD capturing audio (owns silenceTimer)
+    case transcribing  // Whisper API call in progress
+    case delivered     // Utterance delivered, waiting for VM
+}
+
 final class SpeechService: @unchecked Sendable {
     private var audioEngine: AVAudioEngine?
-    private var silenceTimer: Timer?
-
-    // Audio buffer for Whisper (active mode only)
-    private var audioBuffer: [Float] = []
-    private let bufferLock = NSLock()
-    private var isSpeaking = false
     private var recordingSampleRate: Double = 16000
+
+    // MARK: - State Store (thread-safe via OSAllocatedUnfairLock)
+
+    private struct StateStore {
+        var flowState: VoiceFlowState = .idle
+        var audioBuffer: [Float] = []
+        var peakDB: Float = -100
+        var isSpeechDetected: Bool = false
+        var speechStartTime: Date? = nil
+    }
+
+    private let store = OSAllocatedUnfairLock(initialState: StateStore())
+
+    // MARK: - Settings
 
     var silenceTimeout: TimeInterval = 3.0
     var sttLanguage: String = "en"
     var speakerMode: Bool = false
-
-    /// Wake word trigger
     var triggerWord: String = "easy"
-    private(set) var isActivated: Bool = false
-    var onTriggerDetected: (() -> Void)?
 
-    /// Apple SFSpeechRecognizer for on-device wake word detection
+    // MARK: - Callbacks
+
+    var onFlowStateChanged: ((VoiceFlowState) -> Void)?
+    var onTriggerDetected: (() -> Void)?
+    var onUtteranceCaptured: ((String) -> Void)?
+    var onTextChanged: ((String) -> Void)?
+    var onDebugLog: ((String) -> Void)?
+    var onActivationTimeout: (() -> Void)?
+
+    // MARK: - Whisper
+
+    var whisperService: WhisperService?
+    private var whisperTask: Task<Void, Never>?
+
+    // MARK: - SFSpeech (passive mode)
+
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var passiveWatchdog: Timer?
-
-    /// Whisper API service (injected externally)
-    var whisperService: WhisperService?
-
-    /// Delivers finalized utterance text
-    var onUtteranceCaptured: ((String) -> Void)?
-    /// Real-time status text
-    var onTextChanged: ((String) -> Void)?
-    /// Debug log callback
-    var onDebugLog: ((String) -> Void)?
-
-    private(set) var isListening = false
-
-    /// VAD settings — relative drop detection
-    private let dropThresholdDB: Float = 8  // dB drop from peak = silence
-    private var peakDB: Float = -100
-    private var speechStartTime: Date?
-
-    /// Watchdog: track last callback time to detect stale recognition
     private var lastCallbackTime: Date?
+    private var tapCounter = 0
+    private var callbackCounter = 0
 
-    /// Activation timeout — return to passive if no speech after wake word
-    private var activationTimer: Timer?
-    var onActivationTimeout: (() -> Void)?
+    // MARK: - Timers (owned by specific states)
 
-    /// Ding playback
+    private var activationTimer: Timer?   // owned by .activated
+    private var silenceTimer: Timer?       // owned by .capturing
+
+    // MARK: - VAD
+
+    private let dropThresholdDB: Float = 8
+    private var dbLogCounter = 0
+
+    // MARK: - Ding
+
     private var dingAudioPlayer: AVAudioPlayer?
 
-    /// Whisper hallucination filter
+    // MARK: - Whisper hallucination filter
+
     private let hallucinationPhrases: [String] = [
         "MBC 뉴스", "이덕영입니다", "시청해 주셔서 감사합니다",
         "구독과 좋아요", "영상이 도움이 되셨다면", "감사합니다",
@@ -68,6 +89,24 @@ final class SpeechService: @unchecked Sendable {
         "sous-titres", "sous-titrage", "Untertitel",
         "请不吝点赞", "订阅", "小铃铛",
     ]
+
+    // MARK: - Public read-only state
+
+    var flowState: VoiceFlowState {
+        store.withLock { $0.flowState }
+    }
+
+    var isListening: Bool {
+        let state = flowState
+        return state != .idle
+    }
+
+    var isActivated: Bool {
+        let state = flowState
+        return state == .activated || state == .capturing || state == .transcribing || state == .delivered
+    }
+
+    // MARK: - Permissions
 
     func requestPermission() async -> Bool {
         let micStatus = AVAudioApplication.shared.recordPermission
@@ -89,8 +128,11 @@ final class SpeechService: @unchecked Sendable {
         return speechStatus == .authorized
     }
 
+    // MARK: - Start / Stop
+
     func startListening() throws {
-        if isListening { stopListening() }
+        let current = flowState
+        if current != .idle { stopListening() }
 
         let audioSession = AVAudioSession.sharedInstance()
         try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
@@ -108,32 +150,29 @@ final class SpeechService: @unchecked Sendable {
         let nativeFormat = inputNode.outputFormat(forBus: 0)
         recordingSampleRate = nativeFormat.sampleRate
 
-        // Install audio tap — routes to either SFSpeech (passive) or VAD+Whisper (active)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] buffer, _ in
             self?.handleAudioTap(buffer)
         }
 
-        bufferLock.lock()
-        audioBuffer.removeAll()
-        bufferLock.unlock()
-        isSpeaking = false
-        speechStartTime = nil
-        isActivated = false
+        store.withLock {
+            $0.audioBuffer.removeAll()
+            $0.peakDB = -100
+            $0.isSpeechDetected = false
+            $0.speechStartTime = nil
+        }
 
         engine.prepare()
         try engine.start()
-        isListening = true
 
-        // Start in passive mode (SFSpeechRecognizer for wake word)
-        startPassiveRecognition()
+        transition(to: .passive)
         log.info("Started (passive mode, on-device wake word)")
     }
 
     func stopListening() {
-        silenceTimer?.invalidate()
-        silenceTimer = nil
-        activationTimer?.invalidate()
-        activationTimer = nil
+        whisperTask?.cancel()
+        whisperTask = nil
+
+        teardown(flowState)
 
         stopPassiveRecognition()
 
@@ -142,46 +181,146 @@ final class SpeechService: @unchecked Sendable {
             engine.inputNode.removeTap(onBus: 0)
         }
         audioEngine = nil
-        isListening = false
-        isActivated = false
-        isSpeaking = false
-        speechStartTime = nil
 
-        bufferLock.lock()
-        audioBuffer.removeAll()
-        bufferLock.unlock()
+        store.withLock {
+            $0.flowState = .idle
+            $0.audioBuffer.removeAll()
+            $0.peakDB = -100
+            $0.isSpeechDetected = false
+            $0.speechStartTime = nil
+        }
+
+        DispatchQueue.main.async {
+            self.onFlowStateChanged?(.idle)
+        }
     }
 
-    func restartRecognition() {
-        silenceTimer?.invalidate()
-        silenceTimer = nil
-        isActivated = false
-        isSpeaking = false
-        speechStartTime = nil
-        peakDB = -100
+    /// Restart to passive without restarting the audio engine (for barge-in)
+    func restartToPassive() {
+        let current = flowState
+        guard current != .idle && current != .passive else { return }
 
-        bufferLock.lock()
-        audioBuffer.removeAll()
-        bufferLock.unlock()
+        whisperTask?.cancel()
+        whisperTask = nil
 
-        // Return to passive mode
-        startPassiveRecognition()
+        teardown(current)
 
+        store.withLock {
+            $0.audioBuffer.removeAll()
+            $0.peakDB = -100
+            $0.isSpeechDetected = false
+            $0.speechStartTime = nil
+        }
+
+        transition(to: .passive)
         DispatchQueue.main.async {
             self.onTextChanged?("")
         }
-        log.info("Back to passive mode")
+        log.info("Back to passive mode (no engine restart)")
+    }
+
+    // MARK: - State Machine
+
+    private func transition(to newState: VoiceFlowState) {
+        let oldState = flowState
+
+        // Teardown old state resources
+        teardown(oldState)
+
+        // Update state
+        store.withLock { $0.flowState = newState }
+
+        // Setup new state resources
+        setup(newState)
+
+        log.info("State: \(oldState.rawValue) → \(newState.rawValue)")
+        DispatchQueue.main.async {
+            self.onFlowStateChanged?(newState)
+        }
+    }
+
+    private func teardown(_ state: VoiceFlowState) {
+        switch state {
+        case .idle:
+            break
+        case .passive:
+            DispatchQueue.main.async {
+                self.passiveWatchdog?.invalidate()
+                self.passiveWatchdog = nil
+            }
+            // Don't stop recognition here — startPassiveRecognition handles cleanup
+        case .activated:
+            DispatchQueue.main.async {
+                self.activationTimer?.invalidate()
+                self.activationTimer = nil
+            }
+        case .capturing:
+            DispatchQueue.main.async {
+                self.silenceTimer?.invalidate()
+                self.silenceTimer = nil
+            }
+        case .transcribing:
+            // whisperTask cancellation handled explicitly where needed
+            break
+        case .delivered:
+            break
+        }
+    }
+
+    private func setup(_ state: VoiceFlowState) {
+        switch state {
+        case .idle:
+            break
+
+        case .passive:
+            startPassiveRecognition()
+
+        case .activated:
+            store.withLock {
+                $0.audioBuffer.removeAll()
+                $0.peakDB = -100
+                $0.isSpeechDetected = false
+                $0.speechStartTime = nil
+            }
+            dbLogCounter = 0
+            // Start activation timer (5s timeout)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.activationTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+                    guard let self else { return }
+                    let current = self.flowState
+                    guard current == .activated else { return }
+                    log.info("Activation timeout, back to passive")
+                    self.transition(to: .passive)
+                    DispatchQueue.main.async {
+                        self.onDebugLog?("timeout → passive")
+                        self.onActivationTimeout?()
+                    }
+                }
+            }
+
+        case .capturing:
+            // Start silence timer
+            startSilenceTimer()
+
+        case .transcribing:
+            break
+
+        case .delivered:
+            break
+        }
     }
 
     // MARK: - Audio Tap Router
 
-    private var tapCounter = 0
-    private var callbackCounter = 0
     private func handleAudioTap(_ buffer: AVAudioPCMBuffer) {
         tapCounter += 1
-        if isActivated {
+        let state = flowState
+
+        switch state {
+        case .activated, .capturing:
             processAudioBuffer(buffer)
-        } else {
+        case .passive:
             let hasReq = recognitionRequest != nil
             recognitionRequest?.append(buffer)
             if tapCounter % 200 == 0 {
@@ -191,6 +330,8 @@ final class SpeechService: @unchecked Sendable {
                     self.onDebugLog?("tap=\(tc) req=\(hasReq) cb=\(cc)")
                 }
             }
+        default:
+            break
         }
     }
 
@@ -200,7 +341,6 @@ final class SpeechService: @unchecked Sendable {
         stopPassiveRecognition()
         DispatchQueue.main.async { self.onDebugLog?("init SFSpeech...") }
 
-        // Always use English for wake word "easy"
         let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         speechRecognizer = recognizer
 
@@ -236,34 +376,17 @@ final class SpeechService: @unchecked Sendable {
                 if self.containsTrigger(lower) {
                     log.notice("Wake word detected! \"\(text)\"")
                     self.stopPassiveRecognition()
-                    self.isActivated = true
+                    // Transition to activated
+                    self.transition(to: .activated)
                     DispatchQueue.main.async {
                         self.onTextChanged?("")
                         self.onTriggerDetected?()
-                        // Activation timeout: return to passive if no speech
-                        self.activationTimer?.invalidate()
-                        self.activationTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
-                            guard let self, self.isActivated else { return }
-                            log.info("Activation timeout, back to passive")
-                            self.isActivated = false
-                            self.isSpeaking = false
-                            self.speechStartTime = nil
-                            self.peakDB = -100
-                            self.bufferLock.lock()
-                            self.audioBuffer.removeAll()
-                            self.bufferLock.unlock()
-                            self.startPassiveRecognition()
-                            DispatchQueue.main.async {
-                                self.onDebugLog?("timeout → passive")
-                                self.onActivationTimeout?()
-                            }
-                        }
                     }
                     return
                 }
 
-                // Utterance finalized → restart immediately for continuous listening
-                if result.isFinal && self.isListening && !self.isActivated {
+                // Utterance finalized → restart for continuous listening
+                if result.isFinal && self.flowState == .passive {
                     log.info("SFSpeech finalized, restarting")
                     self.startPassiveRecognition()
                     return
@@ -272,15 +395,11 @@ final class SpeechService: @unchecked Sendable {
 
             if let error {
                 let nsError = error as NSError
-                // 1110 = normal cancellation (intentional stop/restart) — do NOT restart
-                if nsError.code == 1110 {
-                    return
-                }
+                if nsError.code == 1110 { return } // normal cancellation
                 log.error("SFSpeech error: \(nsError.domain) \(nsError.code) \(error.localizedDescription)")
-                // Auto-restart quickly for real errors
-                if self.isListening && !self.isActivated {
+                if self.flowState == .passive {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                        guard let self, self.isListening, !self.isActivated else { return }
+                        guard let self, self.flowState == .passive else { return }
                         self.startPassiveRecognition()
                     }
                 }
@@ -293,12 +412,11 @@ final class SpeechService: @unchecked Sendable {
         log.info("Passive recognition started")
         DispatchQueue.main.async { self.onDebugLog?("passive started") }
 
-        // Watchdog: repeating timer checks for stale recognition every 5s
+        // Watchdog timer
         DispatchQueue.main.async { [weak self] in
             self?.passiveWatchdog?.invalidate()
             self?.passiveWatchdog = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-                guard let self, self.isListening, !self.isActivated else { return }
-                // No callback ever received, or no callback in last 5s
+                guard let self, self.flowState == .passive else { return }
                 let stale: Bool
                 if let last = self.lastCallbackTime {
                     stale = Date().timeIntervalSince(last) > 5.0
@@ -325,7 +443,6 @@ final class SpeechService: @unchecked Sendable {
 
     // MARK: - Active Mode (VAD + Whisper)
 
-    private var dbLogCounter = 0
     private func processAudioBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData else { return }
         let frameLength = Int(buffer.frameLength)
@@ -334,86 +451,57 @@ final class SpeechService: @unchecked Sendable {
         let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(frameLength))
         let db = 20 * log10(max(rms, 1e-10))
 
+        let state = flowState
+
         dbLogCounter += 1
         if dbLogCounter % 50 == 0 {
-            let dbVal = db
-            let pk = peakDB
-            let speaking = isSpeaking
+            let pk = store.withLock { $0.peakDB }
+            let spk = state == .capturing
             DispatchQueue.main.async {
-                self.onDebugLog?("dB=\(String(format: "%.0f", dbVal)) pk=\(String(format: "%.0f", pk)) spk=\(speaking)")
+                self.onDebugLog?("dB=\(String(format: "%.0f", db)) pk=\(String(format: "%.0f", pk)) spk=\(spk)")
             }
         }
 
-        if !isSpeaking {
-            // Not speaking yet — detect speech start when dB rises significantly
-            // Use first few buffers to establish baseline, then detect rise
+        if state == .activated {
+            // Waiting for speech start
+            let peakDB = store.withLock { $0.peakDB }
             if peakDB < -99 {
-                // First buffer — set baseline
-                peakDB = db
+                store.withLock { $0.peakDB = db }
             } else if db > peakDB + 3 {
-                // Significant rise from baseline = speech started
-                isSpeaking = true
-                peakDB = db
-                speechStartTime = Date()
-                resetSilenceTimer()
+                // Speech detected! Transition activated → capturing
+                store.withLock {
+                    $0.isSpeechDetected = true
+                    $0.peakDB = db
+                    $0.speechStartTime = Date()
+                    $0.audioBuffer.append(contentsOf: samples)
+                }
+                // activationTimer is invalidated by teardown(.activated) inside transition
+                transition(to: .capturing)
                 DispatchQueue.main.async {
                     self.onTextChanged?("Listening...")
                 }
             } else {
-                // Update baseline (slowly track ambient level)
-                peakDB = peakDB * 0.95 + db * 0.05
+                store.withLock { $0.peakDB = $0.peakDB * 0.95 + db * 0.05 }
             }
-        } else {
-            // Speaking — track peak and detect drop
+        } else if state == .capturing {
+            // Capturing audio — track peak and detect silence
+            let peakDB = store.withLock { $0.peakDB }
             if db > peakDB {
-                peakDB = db
+                store.withLock { $0.peakDB = db }
             }
 
             if db < peakDB - dropThresholdDB {
-                // Significant drop — don't reset silence timer (let it expire)
+                // Significant drop — let silence timer expire
             } else {
                 // Still speaking — reset silence timer
-                resetSilenceTimer()
+                startSilenceTimer()
             }
-        }
 
-        // Always capture audio once speaking starts
-        if isSpeaking {
-            bufferLock.lock()
-            audioBuffer.append(contentsOf: samples)
-            bufferLock.unlock()
+            store.withLock { $0.audioBuffer.append(contentsOf: samples) }
         }
     }
 
-    /// Reset active mode state for retry — keeps isActivated true, restarts activation timer
-    private func resetActiveState() {
-        isSpeaking = false
-        speechStartTime = nil
-        peakDB = -100
-        bufferLock.lock()
-        audioBuffer.removeAll()
-        bufferLock.unlock()
-
-        // Restart activation timer so it eventually times out
-        activationTimer?.invalidate()
-        activationTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
-            guard let self, self.isActivated else { return }
-            log.info("Activation timeout after retry, back to passive")
-            self.isActivated = false
-            self.isSpeaking = false
-            self.peakDB = -100
-            self.bufferLock.lock()
-            self.audioBuffer.removeAll()
-            self.bufferLock.unlock()
-            self.startPassiveRecognition()
-            DispatchQueue.main.async {
-                self.onDebugLog?("timeout → passive")
-                self.onActivationTimeout?()
-            }
-        }
-    }
-
-    private func resetSilenceTimer() {
+    private func startSilenceTimer() {
         let timeout = silenceTimeout
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -425,32 +513,28 @@ final class SpeechService: @unchecked Sendable {
     }
 
     private func captureAndTranscribe() {
-        guard isSpeaking else { return }
+        guard flowState == .capturing else { return }
 
-        // Cancel activation timer immediately — we have audio to process,
-        // don't let it fire during the Whisper API call
-        DispatchQueue.main.async {
-            self.activationTimer?.invalidate()
-            self.activationTimer = nil
+        let samples = store.withLock { state -> [Float] in
+            let buf = state.audioBuffer
+            state.audioBuffer.removeAll()
+            state.isSpeechDetected = false
+            state.speechStartTime = nil
+            state.peakDB = -100
+            return buf
         }
 
-        bufferLock.lock()
-        let samples = audioBuffer
-        audioBuffer.removeAll()
-        bufferLock.unlock()
+        guard !samples.isEmpty else {
+            // No audio captured — go back to activated to retry
+            transition(to: .activated)
+            return
+        }
 
-        isSpeaking = false
-        speechStartTime = nil
-        peakDB = -100
-
-        guard !samples.isEmpty else { return }
+        // Transition to transcribing
+        transition(to: .transcribing)
 
         let duration = Double(samples.count) / recordingSampleRate
         log.info("Captured: \(String(format: "%.1f", duration))s, \(samples.count) samples")
-
-        let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
-        let avgDB = 20 * log10(max(rms, 1e-10))
-        log.debug("avgDB=\(String(format: "%.1f", avgDB))")
 
         DispatchQueue.main.async {
             self.onTextChanged?("Recognizing...")
@@ -460,9 +544,10 @@ final class SpeechService: @unchecked Sendable {
         let wavData = createWAV(from: samples, sampleRate: recordingSampleRate)
         let lang = sttLanguage
 
-        Task {
+        whisperTask = Task { [weak self] in
+            guard let self else { return }
             do {
-                guard let whisper = whisperService else {
+                guard let whisper = self.whisperService else {
                     log.error("WhisperService not configured")
                     DispatchQueue.main.async { self.onDebugLog?("whisper: no service!") }
                     return
@@ -470,48 +555,46 @@ final class SpeechService: @unchecked Sendable {
                 DispatchQueue.main.async { self.onDebugLog?("whisper: calling API...") }
                 let text = try await whisper.transcribe(audioData: wavData, language: lang)
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                guard !Task.isCancelled else { return }
+
                 guard !trimmed.isEmpty else {
-                    DispatchQueue.main.async {
-                        self.onDebugLog?("whisper: empty, retry...")
-                        self.resetActiveState()
-                    }
+                    log.info("Whisper: empty result, retry")
+                    DispatchQueue.main.async { self.onDebugLog?("whisper: empty, retry...") }
+                    self.transition(to: .activated)
                     return
                 }
 
-                // Whisper hallucination filter
+                // Hallucination filter
                 let lower = trimmed.lowercased()
                 let isHallucination = self.hallucinationPhrases.contains { lower.contains($0.lowercased()) }
                 if isHallucination {
                     log.info("Hallucination filter: \"\(trimmed)\" → skip")
-                    DispatchQueue.main.async {
-                        self.onDebugLog?("whisper: hallucination, retry...")
-                        self.resetActiveState()
-                    }
+                    DispatchQueue.main.async { self.onDebugLog?("whisper: hallucination, retry...") }
+                    self.transition(to: .activated)
                     return
                 }
 
                 log.notice("Whisper recognized: \"\(trimmed)\"")
                 DispatchQueue.main.async { self.onDebugLog?("whisper: \"\(trimmed.prefix(30))\"") }
 
-                // Valid result — cancel activation timer and deliver utterance
-                DispatchQueue.main.async {
-                    self.activationTimer?.invalidate()
-                    self.activationTimer = nil
-                }
-                self.isActivated = false
+                // Valid result — transition to delivered
+                self.transition(to: .delivered)
                 DispatchQueue.main.async {
                     self.onTextChanged?(trimmed)
                     self.onUtteranceCaptured?(trimmed)
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 log.error("Whisper error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     self.onDebugLog?("whisper ERR: \(error.localizedDescription.prefix(60))")
                 }
-                self.isActivated = false
-                // Delay restart so user can read error
+                // Delay then restart to passive
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                    self?.restartRecognition()
+                    guard let self else { return }
+                    self.transition(to: .passive)
+                    DispatchQueue.main.async { self.onTextChanged?("") }
                 }
             }
         }
@@ -519,7 +602,6 @@ final class SpeechService: @unchecked Sendable {
 
     // MARK: - Ding Sound
 
-    /// Play ding WITHOUT stopping engine — keeps Bluetooth audio route intact
     func playDing() {
         log.info("Playing ding (engine stays running)")
 
@@ -543,9 +625,8 @@ final class SpeechService: @unchecked Sendable {
         d.append(contentsOf: [UInt8]("data".utf8))
         d.appendLittleEndian(dataSize)
 
-        // Siri-style two-tone rising chime
-        let freq1: Double = 880   // A5
-        let freq2: Double = 1320  // E6 (perfect fifth up)
+        let freq1: Double = 880
+        let freq2: Double = 1320
         let midpoint = duration * 0.45
         for i in 0..<count {
             let t = Double(i) / sampleRate
@@ -571,7 +652,6 @@ final class SpeechService: @unchecked Sendable {
             player.play()
             log.info("Ding playing")
 
-            // Clean up player after playback
             DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.1) { [weak self] in
                 self?.dingAudioPlayer = nil
             }
@@ -582,20 +662,16 @@ final class SpeechService: @unchecked Sendable {
 
     // MARK: - Trigger Word
 
-    /// Fuzzy match for wake word — accepts common SFSpeech misrecognitions
     private let triggerVariants: Set<String> = [
-        // English
         "easy", "eazy", "ease", "eezy", "ezee", "easey",
         "izi", "izzy", "izzi", "izy", "isy",
         "eiji", "ichi", "vijay", "ej", "aj", "eg",
         "ez", "eze", "ezzy",
-        // Misrecognitions
         "eating", "is it", "e z", "e g",
         "easing", "easily",
     ]
 
     private func containsTrigger(_ text: String) -> Bool {
-        // Multi-word phrase check (e.g. "is it")
         for variant in triggerVariants where variant.contains(" ") {
             if text.contains(variant) { return true }
         }

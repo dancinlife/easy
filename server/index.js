@@ -10,7 +10,7 @@ const { execSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const WebSocket = require("ws");
+const { io } = require("socket.io-client");
 const readline = require("readline");
 
 // ─── Config ───
@@ -358,7 +358,7 @@ function printQR(text) {
   }
 }
 
-// ─── Relay Connector ───
+// ─── Relay Connector (Socket.IO) ───
 
 class RelayConnector {
   constructor(relayURL, room, privateKey, publicKeyRaw) {
@@ -367,75 +367,61 @@ class RelayConnector {
     this.privateKey = privateKey;
     this.publicKeyRaw = publicKeyRaw;
     this.sessionKey = null;
-    this.ws = null;
+    this.socket = null;
     this.pendingCompactSummary = null;
   }
 
   connect() {
     console.log(`[Relay] Connecting: ${this.relayURL}`);
-    if (this.pingInterval) clearInterval(this.pingInterval);
-    this.ws = new WebSocket(this.relayURL);
 
-    this.ws.on("open", () => {
-      console.log("[Relay] WebSocket connected");
-      this.send({ type: "join", room: this.room });
-      // Keep alive with ping every 15s
-      this.pingInterval = setInterval(() => {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.ping();
-        }
-      }, 15000);
+    this.socket = io(this.relayURL, {
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 30000,
+      transports: ["websocket", "polling"],
     });
 
-    this.ws.on("message", (raw) => {
-      try {
-        const str = raw.toString();
-        const msg = JSON.parse(str);
-        if (msg.type !== "message" || !msg.payload?.type?.startsWith("key_exchange")) {
-          console.log(`[WS recv] type=${msg.type} payload.type=${msg.payload?.type || "N/A"} (${str.length}bytes)`);
-        }
-        this.handleMessage(msg);
-      } catch (err) {
-        console.log(`[WS parse error] ${err.message} raw=${raw.toString().slice(0, 100)}`);
-      }
+    this.socket.on("connect", () => {
+      console.log("[Relay] Connected");
+      this.socket.emit("join", { room: this.room });
     });
 
-    this.ws.on("close", () => {
-      console.log("[Relay] Disconnected, reconnecting in 3s...");
-      if (this.pingInterval) clearInterval(this.pingInterval);
+    this.socket.on("joined", (data) => {
+      console.log(`[Relay] Joined room (peers: ${data.peers || 0})`);
+    });
+
+    this.socket.on("peer_joined", () => {
+      console.log("[Relay] iPhone connected!");
+    });
+
+    this.socket.on("peer_left", () => {
+      console.log("[Relay] iPhone disconnected");
       this.sessionKey = null;
-      setTimeout(() => this.connect(), 3000);
     });
 
-    this.ws.on("error", (err) => {
-      console.log(`[Relay] Error: ${err.message}`);
+    this.socket.on("relay", (payload) => {
+      this.handlePayload(payload);
+    });
+
+    this.socket.on("error_msg", (data) => {
+      console.log(`[Relay] Error: ${data.message}`);
+    });
+
+    this.socket.on("disconnect", (reason) => {
+      console.log(`[Relay] Disconnected: ${reason}`);
+      this.sessionKey = null;
+    });
+
+    this.socket.on("reconnect", (attempt) => {
+      console.log(`[Relay] Reconnected (attempt ${attempt})`);
+      this.socket.emit("join", { room: this.room });
     });
   }
 
-  send(obj) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(obj));
-    }
-  }
-
-  handleMessage(msg) {
-    switch (msg.type) {
-      case "joined":
-        console.log(`[Relay] Joined room (peers: ${msg.peers || 0})`);
-        break;
-      case "peer_joined":
-        console.log("[Relay] iPhone connected!");
-        break;
-      case "peer_left":
-        console.log("[Relay] iPhone disconnected");
-        this.sessionKey = null;
-        break;
-      case "message":
-        if (msg.payload) this.handlePayload(msg.payload);
-        break;
-      case "error":
-        console.log(`[Relay] Error: ${msg.message}`);
-        break;
+  emitRelay(payload) {
+    if (this.socket?.connected) {
+      this.socket.emit("relay", payload);
     }
   }
 
@@ -478,7 +464,7 @@ class RelayConnector {
 
       console.log(`[KeyExchange] sessionKey: ${sessionKeyData.slice(0, 8).toString("hex")}... (${sessionKeyData.length}bytes)`);
       console.log("[Relay] Key exchange complete — E2E encryption active");
-      this.send({ type: "message", payload: { type: "key_exchange_ack" } });
+      this.emitRelay({ type: "key_exchange_ack" });
 
       // Send server_info
       this.sendServerInfo();
@@ -495,7 +481,7 @@ class RelayConnector {
       if (sessionTitle) info.title = sessionTitle;
       const plain = Buffer.from(JSON.stringify(info));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
-      this.send({ type: "message", payload: { type: "server_info", encrypted: base64url(encrypted) } });
+      this.emitRelay({ type: "server_info", encrypted: base64url(encrypted) });
       console.log(`[Relay] server_info sent: workDir=${info.workDir} hostname=${info.hostname}${sessionTitle ? ` title=${sessionTitle}` : ""}`);
     } catch (err) {
       console.log(`[Error] server_info send failed: ${err.message}`);
@@ -507,7 +493,7 @@ class RelayConnector {
     try {
       const plain = Buffer.from(JSON.stringify({ sessionId }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
-      this.send({ type: "message", payload: { type: "session_end", encrypted: base64url(encrypted) } });
+      this.emitRelay({ type: "session_end", encrypted: base64url(encrypted) });
       console.log(`[Relay] session_end sent: ${sessionId}`);
     } catch (err) {
       console.log(`[Error] session_end send failed: ${err.message}`);
@@ -523,7 +509,7 @@ class RelayConnector {
     try {
       const plain = Buffer.from(JSON.stringify({ type: "server_shutdown" }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
-      this.send({ type: "message", payload: { type: "server_shutdown", encrypted: base64url(encrypted) } });
+      this.emitRelay({ type: "server_shutdown", encrypted: base64url(encrypted) });
       console.log("[Relay] server_shutdown sent");
     } catch (err) {
       console.log(`[Error] server_shutdown send failed: ${err.message}`);
@@ -627,10 +613,7 @@ class RelayConnector {
     try {
       const plain = Buffer.from(JSON.stringify({ sessionId, inputTokens }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
-      this.send({
-        type: "message",
-        payload: { type: "compact_needed", encrypted: base64url(encrypted) },
-      });
+      this.emitRelay({ type: "compact_needed", encrypted: base64url(encrypted) });
     } catch (err) {
       console.log(`[Error] compact_needed send failed: ${err.message}`);
     }
@@ -642,14 +625,7 @@ class RelayConnector {
     try {
       const plain = Buffer.from(JSON.stringify({ answer }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
-
-      this.send({
-        type: "message",
-        payload: {
-          type: "text_answer",
-          encrypted: base64url(encrypted),
-        },
-      });
+      this.emitRelay({ type: "text_answer", encrypted: base64url(encrypted) });
     } catch (err) {
       console.log(`[Error] Response encryption failed: ${err.message}`);
     }
@@ -661,14 +637,7 @@ class RelayConnector {
     try {
       const plain = Buffer.from(JSON.stringify({ chunk, index }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
-
-      this.send({
-        type: "message",
-        payload: {
-          type: "text_stream",
-          encrypted: base64url(encrypted),
-        },
-      });
+      this.emitRelay({ type: "text_stream", encrypted: base64url(encrypted) });
     } catch (err) {
       console.log(`[Error] Stream chunk encryption failed: ${err.message}`);
     }
@@ -680,14 +649,7 @@ class RelayConnector {
     try {
       const plain = Buffer.from(JSON.stringify({ fullText }));
       const encrypted = aesGcmEncrypt(plain, this.sessionKey);
-
-      this.send({
-        type: "message",
-        payload: {
-          type: "text_done",
-          encrypted: base64url(encrypted),
-        },
-      });
+      this.emitRelay({ type: "text_done", encrypted: base64url(encrypted) });
     } catch (err) {
       console.log(`[Error] Stream done encryption failed: ${err.message}`);
     }
@@ -732,11 +694,8 @@ async function main() {
   function cleanup(signal) {
     console.log(`\n[Exit] ${signal} — shutting down...`);
     connector.sendShutdown();
-    if (connector.ws) {
-      connector.ws.close();
-    }
-    if (connector.pingInterval) {
-      clearInterval(connector.pingInterval);
+    if (connector.socket) {
+      connector.socket.disconnect();
     }
     setTimeout(() => process.exit(0), 500);
   }

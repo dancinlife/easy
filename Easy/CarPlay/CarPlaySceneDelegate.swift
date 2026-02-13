@@ -45,7 +45,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
     private func makeListTemplate() -> CPListTemplate {
         let statusSection = CPListSection(
-            items: [makeStatusItem(status: .idle, isActivated: false, recognizedText: "")],
+            items: [makeStatusItem(status: .idle, flowState: .idle, recognizedText: "")],
             header: "Status",
             sectionIndexTitle: nil
         )
@@ -60,10 +60,10 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
     private func makeStatusItem(
         status: VoiceViewModel.Status,
-        isActivated: Bool,
+        flowState: VoiceFlowState,
         recognizedText: String
     ) -> CPListItem {
-        let (text, detail) = statusDisplay(status: status, isActivated: isActivated, recognizedText: recognizedText)
+        let (text, detail) = statusDisplay(status: status, flowState: flowState, recognizedText: recognizedText)
         let item = CPListItem(text: text, detailText: detail)
         item.handler = nil
         return item
@@ -71,7 +71,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
     private func statusDisplay(
         status: VoiceViewModel.Status,
-        isActivated: Bool,
+        flowState: VoiceFlowState,
         recognizedText: String
     ) -> (String, String) {
         switch status {
@@ -80,7 +80,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         case .listening:
             if !recognizedText.isEmpty {
                 return ("Listening", recognizedText)
-            } else if isActivated {
+            } else if flowState == .activated || flowState == .capturing {
                 return ("Listening...", "Speak now")
             } else {
                 return ("Waiting", "Say \"easy\" to start")
@@ -115,7 +115,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
             var lastStatus = vm.status
             var lastMessageCount = vm.messages.count
-            var lastActivated = vm.isActivated
+            var lastFlowState = vm.speechFlowState
             var lastRecognizedText = vm.recognizedText
 
             self.updateTemplate(vm: vm)
@@ -126,7 +126,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
                     withObservationTracking {
                         _ = vm.status
                         _ = vm.messages.count
-                        _ = vm.isActivated
+                        _ = vm.speechFlowState
                         _ = vm.recognizedText
                     } onChange: {
                         continuation.resume(returning: true)
@@ -140,12 +140,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
                 if vm.status != lastStatus
                     || vm.messages.count != lastMessageCount
-                    || vm.isActivated != lastActivated
+                    || vm.speechFlowState != lastFlowState
                     || vm.recognizedText != lastRecognizedText
                 {
                     lastStatus = vm.status
                     lastMessageCount = vm.messages.count
-                    lastActivated = vm.isActivated
+                    lastFlowState = vm.speechFlowState
                     lastRecognizedText = vm.recognizedText
                     self.updateTemplate(vm: vm)
                 }
@@ -159,7 +159,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
         let statusItem = makeStatusItem(
             status: vm.status,
-            isActivated: vm.isActivated,
+            flowState: vm.speechFlowState,
             recognizedText: vm.recognizedText
         )
         let statusSection = CPListSection(

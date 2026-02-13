@@ -1,12 +1,12 @@
 {
   "name": "easy-relay",
-  "version": "1.0.0",
-  "description": "Easy relay server — room-based WebSocket relay for E2E encrypted messaging",
+  "version": "2.0.0",
+  "description": "Easy relay server — Socket.IO room-based relay for E2E encrypted messaging",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.16.0"
+    "socket.io": "^4.7.0"
   }
 }

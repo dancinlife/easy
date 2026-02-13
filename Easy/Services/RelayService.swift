@@ -1,16 +1,22 @@
 import Foundation
 import CryptoKit
 import os
+@preconcurrency import SocketIO
 
 private let log = Logger(subsystem: "com.ghost.easy", category: "relay")
 
-/// E2E encrypted communication service via Relay server
+/// Sendable wrapper for [String: Any] payload from Socket.IO callbacks
+private struct DictWrapper: @unchecked Sendable {
+    let value: [String: Any]
+    init(_ value: [String: Any]) { self.value = value }
+}
+
+/// E2E encrypted communication service via Relay server (Socket.IO)
 actor RelayService {
-    private var webSocketTask: URLSessionWebSocketTask?
-    private var urlSession: URLSession?
+    nonisolated(unsafe) private var manager: SocketManager?
+    nonisolated(unsafe) private var socket: SocketIOClient?
     private var sessionKey: SymmetricKey?
     private var pairingInfo: PairingInfo?
-    private var connectionId: Int = 0
 
     private var pendingTextContinuation: CheckedContinuation<String, Error>?
     private var streamContinuation: AsyncThrowingStream<StreamEvent, Error>.Continuation?
@@ -73,131 +79,54 @@ actor RelayService {
     init() {}
 
     func connect(with info: PairingInfo) async throws {
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        sessionKey = nil
-        connectionId += 1
-        let myConnectionId = connectionId
-
+        disconnect()
         self.pairingInfo = info
         state = .connecting
 
         log.info("Connecting: \(info.relayURL) room: \(info.room)")
-        debugLog("Connecting to \(info.relayURL)")
-
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = true
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        urlSession = URLSession(configuration: config)
+        debugLog("Connecting...")
 
         guard let url = URL(string: info.relayURL) else {
             state = .disconnected
             throw RelayError.notConnected
         }
 
-        webSocketTask = urlSession?.webSocketTask(with: url)
-        webSocketTask?.resume()
+        let manager = SocketManager(socketURL: url, config: [
+            .reconnects(true),
+            .reconnectAttempts(-1),
+            .reconnectWait(3),
+            .reconnectWaitMax(30),
+            .log(false),
+            .forceWebsockets(false),
+        ])
+        self.manager = manager
+        let socket = manager.defaultSocket
+        self.socket = socket
 
-        try await Task.sleep(for: .milliseconds(500))
-        guard connectionId == myConnectionId else { return }
+        setupHandlers(socket: socket, info: info)
+        socket.connect()
 
-        state = .connected
-
-        let joinMsg: [String: Any] = ["type": "join", "room": info.room]
-        do {
-            try await sendJSON(joinMsg)
-            debugLog("Joined room: \(info.room)")
-        } catch {
-            debugLog("Join failed: \(error.localizedDescription)")
-            throw error
-        }
-
-        startReceiveLoop(connectionId: myConnectionId)
-        startPingLoop(connectionId: myConnectionId)
-
-        do {
-            try await performKeyExchange(serverPublicKey: info.serverPublicKey)
-            debugLog("Key exchange sent, waiting for ack...")
-        } catch {
-            debugLog("Key exchange failed: \(error.localizedDescription)")
-            throw error
-        }
-
-        guard connectionId == myConnectionId else { return }
-
-        // Wait for key_exchange_ack (set by handlePayload)
-        for i in 0..<20 {
+        // Wait for paired state (max 30s)
+        for _ in 0..<60 {
             try await Task.sleep(for: .milliseconds(500))
-            guard connectionId == myConnectionId else { return }
-            if state == .paired {
-                log.notice("Pairing complete (took \(i * 500)ms)")
-                debugLog("Paired! (\(i * 500)ms)")
-                break
-            }
+            if state == .paired { return }
+            if state == .disconnected { throw RelayError.notConnected }
         }
-
         if state != .paired {
-            log.warning("Key exchange ack timeout (10s) — server not responding")
-            debugLog("Key exchange ack timeout (10s)")
             throw RelayError.timeout
         }
     }
 
     func disconnect() {
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
+        socket?.disconnect()
+        manager?.disconnect()
+        socket = nil
+        manager = nil
         sessionKey = nil
         state = .disconnected
     }
 
     var isConnected: Bool { state == .paired }
-
-    /// Attempt reconnection if disconnected (called by NWPathMonitor)
-    func reconnectIfNeeded() async {
-        guard state != .paired, state != .connecting,
-              let info = pairingInfo else { return }
-        state = .connecting
-        do {
-            try await connect(with: info)
-        } catch {
-            log.warning("reconnectIfNeeded failed: \(error)")
-        }
-    }
-
-    /// Send text + receive response (E2E encrypted)
-    func askText(text: String, sessionId: String? = nil) async throws -> String {
-        guard let sessionKey else {
-            throw RelayError.notPaired
-        }
-
-        var payload: [String: Any] = ["text": text]
-        if let sessionId {
-            payload["sessionId"] = sessionId
-        }
-
-        let plainData = try JSONSerialization.data(withJSONObject: payload)
-        let sealed = try AES.GCM.seal(plainData, using: sessionKey)
-        let encryptedBase64 = sealed.combined!.base64URLEncoded()
-
-        let msg: [String: Any] = [
-            "type": "message",
-            "payload": [
-                "type": "ask_text",
-                "encrypted": encryptedBase64
-            ] as [String: Any]
-        ]
-        try await sendJSON(msg)
-
-        return try await withCheckedThrowingContinuation { continuation in
-            self.pendingTextContinuation = continuation
-
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(120))
-                await self?.handleTextTimeout()
-            }
-        }
-    }
 
     /// Send text + receive streamed response (E2E encrypted)
     func askTextStreaming(text: String, sessionId: String? = nil) -> AsyncThrowingStream<StreamEvent, Error> {
@@ -220,14 +149,10 @@ actor RelayService {
                     let sealed = try AES.GCM.seal(plainData, using: sessionKey)
                     let encryptedBase64 = sealed.combined!.base64URLEncoded()
 
-                    let msg: [String: Any] = [
-                        "type": "message",
-                        "payload": [
-                            "type": "ask_text",
-                            "encrypted": encryptedBase64
-                        ] as [String: Any]
-                    ]
-                    try await self.sendJSON(msg)
+                    self.emitRelay([
+                        "type": "ask_text",
+                        "encrypted": encryptedBase64
+                    ] as [String: Any])
 
                     // Timeout
                     Task { [weak self] in
@@ -263,14 +188,10 @@ actor RelayService {
             let sealed = try AES.GCM.seal(plainData, using: sessionKey)
             let encryptedBase64 = sealed.combined!.base64URLEncoded()
 
-            let msg: [String: Any] = [
-                "type": "message",
-                "payload": [
-                    "type": "session_clear",
-                    "encrypted": encryptedBase64
-                ] as [String: Any]
-            ]
-            try await sendJSON(msg)
+            emitRelay([
+                "type": "session_clear",
+                "encrypted": encryptedBase64
+            ] as [String: Any])
             log.info("session_clear sent: \(sessionId)")
         } catch {
             log.error("session_clear send failed: \(error)")
@@ -285,14 +206,10 @@ actor RelayService {
             let sealed = try AES.GCM.seal(plainData, using: sessionKey)
             let encryptedBase64 = sealed.combined!.base64URLEncoded()
 
-            let msg: [String: Any] = [
-                "type": "message",
-                "payload": [
-                    "type": "session_compact",
-                    "encrypted": encryptedBase64
-                ] as [String: Any]
-            ]
-            try await sendJSON(msg)
+            emitRelay([
+                "type": "session_compact",
+                "encrypted": encryptedBase64
+            ] as [String: Any])
             log.info("session_compact sent: \(sessionId) summary=\(summary.prefix(50))")
         } catch {
             log.error("session_compact send failed: \(error)")
@@ -307,14 +224,10 @@ actor RelayService {
             let sealed = try AES.GCM.seal(plainData, using: sessionKey)
             let encryptedBase64 = sealed.combined!.base64URLEncoded()
 
-            let msg: [String: Any] = [
-                "type": "message",
-                "payload": [
-                    "type": "session_end",
-                    "encrypted": encryptedBase64
-                ] as [String: Any]
-            ]
-            try await sendJSON(msg)
+            emitRelay([
+                "type": "session_end",
+                "encrypted": encryptedBase64
+            ] as [String: Any])
             log.info("session_end sent: \(sessionId)")
         } catch {
             log.error("session_end send failed: \(error)")
@@ -323,21 +236,116 @@ actor RelayService {
 
     // MARK: - Private
 
-    private func setDisconnected() {
+    private func setupHandlers(socket: SocketIOClient, info: PairingInfo) {
+        socket.on(clientEvent: .connect) { [weak self] _, _ in
+            guard let self else { return }
+            Task { await self.handleConnect(info: info) }
+        }
+
+        socket.on("joined") { [weak self] data, _ in
+            guard let self else { return }
+            let peers = (data.first as? [String: Any])?["peers"] as? Int ?? 0
+            Task { await self.handleJoined(peers: peers) }
+        }
+
+        socket.on("peer_joined") { [weak self] _, _ in
+            guard let self else { return }
+            Task { await self.handlePeerJoined(info: info) }
+        }
+
+        socket.on("relay") { [weak self] data, _ in
+            guard let self else { return }
+            guard let payload = data.first as? [String: Any] else { return }
+            let sendable = DictWrapper(payload)
+            Task { await self.handleRelay(sendable) }
+        }
+
+        socket.on("peer_left") { [weak self] _, _ in
+            guard let self else { return }
+            Task { await self.handlePeerLeft() }
+        }
+
+        socket.on("error_msg") { [weak self] data, _ in
+            guard let self else { return }
+            let message = (data.first as? [String: Any])?["message"] as? String ?? "unknown"
+            Task { await self.handleErrorMsg(message) }
+        }
+
+        socket.on(clientEvent: .disconnect) { [weak self] _, _ in
+            guard let self else { return }
+            Task { await self.handleDisconnect() }
+        }
+
+        socket.on(clientEvent: .reconnect) { [weak self] _, _ in
+            guard let self else { return }
+            Task { await self.handleReconnect(info: info) }
+        }
+    }
+
+    // MARK: - Socket.IO Event Handlers
+
+    private func handleConnect(info: PairingInfo) {
+        log.info("Socket.IO connected")
+        debugLog("Connected")
+        state = .connecting
+        socket?.emit("join", ["room": info.room])
+    }
+
+    private func handleJoined(peers: Int) {
+        log.info("Joined room (peers: \(peers))")
+        debugLog("Joined room")
+        state = .connected
+    }
+
+    private func handlePeerJoined(info: PairingInfo) {
+        log.info("Peer joined — sending key exchange")
+        debugLog("Peer joined — keying")
+        if state == .connected || state == .connecting {
+            Task {
+                try? await performKeyExchange(serverPublicKey: info.serverPublicKey)
+            }
+        }
+    }
+
+    private func handleRelay(_ wrapper: DictWrapper) {
+        handlePayload(wrapper.value)
+    }
+
+    private func handlePeerLeft() {
+        log.notice("Peer left — server disconnected")
+        sessionKey = nil
+        let callback = onPeerLeft
+        Task { @MainActor in callback?() }
         state = .disconnected
     }
 
-    private func debugLog(_ text: String) {
-        log.info("[\(text)]")
-        let callback = onDebugLog
-        Task { @MainActor in callback?(text) }
+    private func handleErrorMsg(_ message: String) {
+        log.warning("Relay error: \(message)")
+        debugLog("Relay: \(message)")
     }
 
-    private func handleTextTimeout() {
-        if pendingTextContinuation != nil {
-            pendingTextContinuation?.resume(throwing: RelayError.timeout)
-            pendingTextContinuation = nil
+    private func handleDisconnect() {
+        log.info("Socket.IO disconnected")
+        debugLog("Disconnected (reconnecting...)")
+        if state == .paired {
+            state = .connecting
         }
+    }
+
+    private func handleReconnect(info: PairingInfo) {
+        log.info("Socket.IO reconnected")
+        debugLog("Reconnected")
+        socket?.emit("join", ["room": info.room])
+    }
+
+    // MARK: - Helpers
+
+    private func debugLog(_ text: String) {
+        let msg = "[Relay] \(text)"
+        print(msg)
+        log.info("\(msg)")
+        let callback = onDebugLog
+        Task { @MainActor in callback?(text) }
     }
 
     private func performKeyExchange(serverPublicKey: Data) async throws {
@@ -359,144 +367,18 @@ actor RelayService {
         let sealed = try AES.GCM.seal(sessionKeyRaw, using: derivedKey)
         let encryptedSessionKey = sealed.combined!.base64URLEncoded()
 
-        let keyExMsg: [String: Any] = [
-            "type": "message",
-            "payload": [
-                "type": "key_exchange",
-                "publicKey": ephemeralKey.publicKey.rawRepresentation.base64URLEncoded(),
-                "encryptedSessionKey": encryptedSessionKey
-            ] as [String: Any]
-        ]
-        try await sendJSON(keyExMsg)
+        emitRelay([
+            "type": "key_exchange",
+            "publicKey": ephemeralKey.publicKey.rawRepresentation.base64URLEncoded(),
+            "encryptedSessionKey": encryptedSessionKey
+        ] as [String: Any])
 
         self.sessionKey = sessionKeyData
-        try await Task.sleep(for: .milliseconds(500))
+        debugLog("Key exchange sent")
     }
 
-    private func startPingLoop(connectionId: Int) {
-        Task { [weak self] in
-            while true {
-                try? await Task.sleep(for: .seconds(15))
-                guard let self else { return }
-                guard await self.connectionId == connectionId else { return }
-                await self.sendPing()
-            }
-        }
-    }
-
-    private func sendPing() {
-        webSocketTask?.sendPing { error in
-            if let error {
-                log.warning("Ping failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    private func startReceiveLoop(connectionId: Int) {
-        Task { [weak self] in
-            await self?.receiveLoop(connectionId: connectionId)
-        }
-    }
-
-    private func receiveLoop(connectionId: Int) async {
-        guard self.connectionId == connectionId,
-              let webSocketTask else { return }
-
-        do {
-            let message = try await webSocketTask.receive()
-            guard self.connectionId == connectionId else { return }
-            switch message {
-            case .string(let text):
-                handleMessage(text)
-            case .data(let data):
-                if let text = String(data: data, encoding: .utf8) {
-                    handleMessage(text)
-                }
-            @unknown default:
-                break
-            }
-            await receiveLoop(connectionId: connectionId)
-        } catch {
-            guard self.connectionId == connectionId else { return }
-            if state != .disconnected {
-                state = .connecting
-                Task { [weak self] in
-                    let delays: [Int] = [3, 5, 10, 20, 30]
-                    for (i, delay) in delays.enumerated() {
-                        try? await Task.sleep(for: .seconds(delay))
-                        guard let self else { return }
-                        // Check state, not connectionId (connect() changes it)
-                        let currentState = await self.state
-                        if currentState == .paired || currentState == .disconnected { return }
-                        guard let info = await self.pairingInfo else { return }
-                        log.info("Reconnect attempt \(i + 1)/\(delays.count)")
-                        await self.debugLog("Reconnect \(i + 1)/\(delays.count)...")
-                        do {
-                            try await self.connect(with: info)
-                            return  // success
-                        } catch {
-                            log.warning("Reconnect attempt \(i + 1) failed: \(error)")
-                        }
-                    }
-                    guard let self else { return }
-                    let currentState = await self.state
-                    guard currentState != .paired, currentState != .disconnected else { return }
-                    log.error("All reconnect attempts failed")
-                    await self.setDisconnected()
-                }
-            }
-        }
-    }
-
-    private func handleMessage(_ text: String) {
-        guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = json["type"] as? String else { return }
-
-        log.debug("Received: type=\(type) payload.type=\((json["payload"] as? [String: Any])?["type"] as? String ?? "N/A")")
-
-        switch type {
-        case "joined":
-            state = .connected
-        case "peer_joined":
-            break
-        case "peer_left":
-            log.notice("peer_left — server disconnected")
-            sessionKey = nil
-            let callback = onPeerLeft
-            Task { @MainActor in callback?() }
-            state = .disconnected
-        case "error":
-            let message = json["message"] as? String ?? "unknown"
-            log.warning("Relay error: \(message)")
-            debugLog("Relay: \(message)")
-            if message.contains("room is full") {
-                // Stale connection still in room — retry after heartbeat cleans it
-                let myConnectionId = connectionId
-                Task { [weak self] in
-                    for delay in [3, 5, 10, 15] {
-                        try? await Task.sleep(for: .seconds(delay))
-                        guard let self else { return }
-                        let currentState = await self.state
-                        if currentState == .paired || currentState == .disconnected { return }
-                        guard let info = await self.pairingInfo else { return }
-                        log.info("Room full retry after \(delay)s...")
-                        await self.debugLog("Room full — retry \(delay)s")
-                        do {
-                            try await self.connect(with: info)
-                            return
-                        } catch {
-                            log.warning("Room full retry failed: \(error)")
-                        }
-                    }
-                }
-            }
-        case "message":
-            guard let payload = json["payload"] as? [String: Any] else { return }
-            handlePayload(payload)
-        default:
-            break
-        }
+    private func emitRelay(_ payload: [String: Any]) {
+        socket?.emit("relay", payload)
     }
 
     private func handlePayload(_ payload: [String: Any]) {
@@ -505,6 +387,7 @@ actor RelayService {
         switch msgType {
         case "key_exchange_ack":
             state = .paired
+            debugLog("Paired!")
 
         case "server_info":
             guard let sessionKey,
@@ -629,7 +512,6 @@ actor RelayService {
                 log.error("text_answer guard failed")
                 pendingTextContinuation?.resume(throwing: RelayError.invalidResponse)
                 pendingTextContinuation = nil
-                // Also finish stream if active
                 streamContinuation?.finish(throwing: RelayError.invalidResponse)
                 streamContinuation = nil
                 return
@@ -672,11 +554,5 @@ actor RelayService {
         default:
             break
         }
-    }
-
-    private func sendJSON(_ json: [String: Any]) async throws {
-        guard let data = try? JSONSerialization.data(withJSONObject: json),
-              let text = String(data: data, encoding: .utf8) else { return }
-        try await webSocketTask?.send(.string(text))
     }
 }
