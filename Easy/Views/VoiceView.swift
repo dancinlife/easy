@@ -80,7 +80,7 @@ struct VoiceView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            } else if vm.isActivated {
+            } else if vm.speechFlowState == .activated || vm.speechFlowState == .capturing {
                 HStack(spacing: 4) {
                     Image(systemName: "ear")
                         .font(.caption2)
@@ -251,7 +251,7 @@ struct VoiceView: View {
 
     private var statusLabel: String {
         switch vm.relayState {
-        case .disconnected: "Off"
+        case .disconnected: vm.isConfigured ? "Wait" : "Off"
         case .connecting: "Wait"
         case .connected: "Wait"
         case .paired: "Live"
@@ -260,7 +260,7 @@ struct VoiceView: View {
 
     private var statusLabelColor: Color {
         switch vm.relayState {
-        case .disconnected: .red
+        case .disconnected: vm.isConfigured ? .orange : .red
         case .connecting, .connected: .orange
         case .paired: .green
         }

@@ -17,7 +17,26 @@ const wss = new WebSocketServer({ port: PORT });
 // room → Set<ws>
 const rooms = new Map();
 
+// Heartbeat: detect dead connections (WiFi→LTE 등)
+const HEARTBEAT_INTERVAL = 15000;
+const heartbeat = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      console.log("[Heartbeat] Terminating dead connection");
+      ws.terminate();
+      return;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL);
+
+wss.on("close", () => clearInterval(heartbeat));
+
 wss.on("connection", (ws) => {
+  ws.isAlive = true;
+  ws.on("pong", () => { ws.isAlive = true; });
+
   let currentRoom = null;
 
   ws.on("message", (raw) => {
@@ -44,9 +63,29 @@ wss.on("connection", (ws) => {
       const peers = rooms.get(room);
 
       if (peers.size >= 2) {
-        ws.send(JSON.stringify({ type: "error", message: "room is full" }));
-        currentRoom = null;
-        return;
+        // Evict dead connections before rejecting
+        for (const peer of [...peers]) {
+          if (peer.readyState !== 1 /* OPEN */) {
+            console.log("[Room] Evicting non-OPEN peer");
+            leaveRoom(peer, room);
+            peer.terminate();
+          }
+        }
+        if (peers.size >= 2) {
+          // Force ping to detect stale TCP — evict non-responsive
+          for (const peer of [...peers]) {
+            try { peer.ping(); } catch {
+              console.log("[Room] Evicting ping-failed peer");
+              leaveRoom(peer, room);
+              peer.terminate();
+            }
+          }
+        }
+        if (peers.size >= 2) {
+          ws.send(JSON.stringify({ type: "error", message: "room is full" }));
+          currentRoom = null;
+          return;
+        }
       }
 
       // 기존 피어에게 알림

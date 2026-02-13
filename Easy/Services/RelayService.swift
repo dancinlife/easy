@@ -57,6 +57,9 @@ actor RelayService {
     nonisolated(unsafe) var onStateChanged: (@Sendable (ConnectionState) -> Void)?
     nonisolated(unsafe) var onSessionEnd: (@Sendable (String) -> Void)?
     nonisolated(unsafe) var onCompactNeeded: (@Sendable (String) -> Void)?
+    nonisolated(unsafe) var onPeerLeft: (@Sendable () -> Void)?
+    nonisolated(unsafe) var onServerShutdown: (@Sendable () -> Void)?
+    nonisolated(unsafe) var onDebugLog: (@Sendable (String) -> Void)?
     private(set) var state: ConnectionState = .disconnected {
         didSet {
             let callback = onStateChanged
@@ -80,8 +83,13 @@ actor RelayService {
         state = .connecting
 
         log.info("Connecting: \(info.relayURL) room: \(info.room)")
+        debugLog("Connecting to \(info.relayURL)")
 
-        urlSession = URLSession(configuration: .default)
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        urlSession = URLSession(configuration: config)
 
         guard let url = URL(string: info.relayURL) else {
             state = .disconnected
@@ -97,12 +105,24 @@ actor RelayService {
         state = .connected
 
         let joinMsg: [String: Any] = ["type": "join", "room": info.room]
-        try await sendJSON(joinMsg)
+        do {
+            try await sendJSON(joinMsg)
+            debugLog("Joined room: \(info.room)")
+        } catch {
+            debugLog("Join failed: \(error.localizedDescription)")
+            throw error
+        }
 
         startReceiveLoop(connectionId: myConnectionId)
         startPingLoop(connectionId: myConnectionId)
 
-        try await performKeyExchange(serverPublicKey: info.serverPublicKey)
+        do {
+            try await performKeyExchange(serverPublicKey: info.serverPublicKey)
+            debugLog("Key exchange sent, waiting for ack...")
+        } catch {
+            debugLog("Key exchange failed: \(error.localizedDescription)")
+            throw error
+        }
 
         guard connectionId == myConnectionId else { return }
 
@@ -112,13 +132,15 @@ actor RelayService {
             guard connectionId == myConnectionId else { return }
             if state == .paired {
                 log.notice("Pairing complete (took \(i * 500)ms)")
+                debugLog("Paired! (\(i * 500)ms)")
                 break
             }
         }
 
         if state != .paired {
             log.warning("Key exchange ack timeout (10s) — server not responding")
-            state = .disconnected
+            debugLog("Key exchange ack timeout (10s)")
+            throw RelayError.timeout
         }
     }
 
@@ -130,6 +152,18 @@ actor RelayService {
     }
 
     var isConnected: Bool { state == .paired }
+
+    /// Attempt reconnection if disconnected (called by NWPathMonitor)
+    func reconnectIfNeeded() async {
+        guard state != .paired, state != .connecting,
+              let info = pairingInfo else { return }
+        state = .connecting
+        do {
+            try await connect(with: info)
+        } catch {
+            log.warning("reconnectIfNeeded failed: \(error)")
+        }
+    }
 
     /// Send text + receive response (E2E encrypted)
     func askText(text: String, sessionId: String? = nil) async throws -> String {
@@ -289,6 +323,16 @@ actor RelayService {
 
     // MARK: - Private
 
+    private func setDisconnected() {
+        state = .disconnected
+    }
+
+    private func debugLog(_ text: String) {
+        log.info("[\(text)]")
+        let callback = onDebugLog
+        Task { @MainActor in callback?(text) }
+    }
+
     private func handleTextTimeout() {
         if pendingTextContinuation != nil {
             pendingTextContinuation?.resume(throwing: RelayError.timeout)
@@ -377,12 +421,28 @@ actor RelayService {
             if state != .disconnected {
                 state = .connecting
                 Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(3))
-                    guard let self else { return }
-                    guard await self.connectionId == connectionId else { return }
-                    if let info = await self.pairingInfo {
-                        try? await self.connect(with: info)
+                    let delays: [Int] = [3, 5, 10, 20, 30]
+                    for (i, delay) in delays.enumerated() {
+                        try? await Task.sleep(for: .seconds(delay))
+                        guard let self else { return }
+                        // Check state, not connectionId (connect() changes it)
+                        let currentState = await self.state
+                        if currentState == .paired || currentState == .disconnected { return }
+                        guard let info = await self.pairingInfo else { return }
+                        log.info("Reconnect attempt \(i + 1)/\(delays.count)")
+                        await self.debugLog("Reconnect \(i + 1)/\(delays.count)...")
+                        do {
+                            try await self.connect(with: info)
+                            return  // success
+                        } catch {
+                            log.warning("Reconnect attempt \(i + 1) failed: \(error)")
+                        }
                     }
+                    guard let self else { return }
+                    let currentState = await self.state
+                    guard currentState != .paired, currentState != .disconnected else { return }
+                    log.error("All reconnect attempts failed")
+                    await self.setDisconnected()
                 }
             }
         }
@@ -403,7 +463,34 @@ actor RelayService {
         case "peer_left":
             log.notice("peer_left — server disconnected")
             sessionKey = nil
+            let callback = onPeerLeft
+            Task { @MainActor in callback?() }
             state = .disconnected
+        case "error":
+            let message = json["message"] as? String ?? "unknown"
+            log.warning("Relay error: \(message)")
+            debugLog("Relay: \(message)")
+            if message.contains("room is full") {
+                // Stale connection still in room — retry after heartbeat cleans it
+                let myConnectionId = connectionId
+                Task { [weak self] in
+                    for delay in [3, 5, 10, 15] {
+                        try? await Task.sleep(for: .seconds(delay))
+                        guard let self else { return }
+                        let currentState = await self.state
+                        if currentState == .paired || currentState == .disconnected { return }
+                        guard let info = await self.pairingInfo else { return }
+                        log.info("Room full retry after \(delay)s...")
+                        await self.debugLog("Room full — retry \(delay)s")
+                        do {
+                            try await self.connect(with: info)
+                            return
+                        } catch {
+                            log.warning("Room full retry failed: \(error)")
+                        }
+                    }
+                }
+            }
         case "message":
             guard let payload = json["payload"] as? [String: Any] else { return }
             handlePayload(payload)
@@ -466,6 +553,8 @@ actor RelayService {
 
         case "server_shutdown":
             log.notice("server_shutdown received")
+            let callback = onServerShutdown
+            Task { @MainActor in callback?() }
             state = .disconnected
 
         case "compact_needed":

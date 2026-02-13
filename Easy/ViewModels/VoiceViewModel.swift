@@ -1,6 +1,7 @@
 import ActivityKit
 import AVFoundation
 import Foundation
+import Network
 import os
 import SwiftUI
 import UIKit
@@ -20,7 +21,7 @@ final class VoiceViewModel {
     var status: Status = .idle
     var error: String?
     var recognizedText: String = ""
-    var isActivated: Bool = false
+    var speechFlowState: VoiceFlowState = .idle
     var debugLog: String = ""
 
     // Utterance Queue (mcp-voice-hooks pattern)
@@ -124,6 +125,7 @@ final class VoiceViewModel {
     var tts = TTSService()
     private let relay = RelayService()
     private let whisper = WhisperService()
+    private var networkMonitor: NWPathMonitor?
 
     enum Status {
         case idle
@@ -166,6 +168,14 @@ final class VoiceViewModel {
             }
         }
 
+        // Flow state changes from SpeechService
+        speech.onFlowStateChanged = { [weak self] newState in
+            Task { @MainActor in
+                guard let self else { return }
+                self.speechFlowState = newState
+            }
+        }
+
         // Wake word detected → stop TTS if playing → ding + activate
         speech.onTriggerDetected = { [weak self] in
             Task { @MainActor in
@@ -174,7 +184,6 @@ final class VoiceViewModel {
                     self.tts.stop()
                     self.isProcessing = false
                 }
-                self.isActivated = true
                 self.status = .listening
                 self.recognizedText = ""
                 self.updateActivity(status: .listening)
@@ -193,7 +202,6 @@ final class VoiceViewModel {
         speech.onActivationTimeout = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                self.isActivated = false
                 self.recognizedText = ""
             }
         }
@@ -203,7 +211,8 @@ final class VoiceViewModel {
             Task { @MainActor in
                 guard let self, self.currentSessionId != nil else { return }
                 // Skip if barge-in already took over
-                guard !self.isActivated else { return }
+                let flowState = self.speechFlowState
+                guard flowState == .passive || flowState == .idle else { return }
                 self.isProcessing = false
 
                 // Auto-compact if pending and queue is empty
@@ -218,6 +227,12 @@ final class VoiceViewModel {
                 } else {
                     self.processNextUtterance()
                 }
+            }
+        }
+
+        relay.onDebugLog = { [weak self] text in
+            Task { @MainActor in
+                self?.debugLog = text
             }
         }
 
@@ -267,17 +282,36 @@ final class VoiceViewModel {
         relay.onStateChanged = { [weak self] newState in
             Task { @MainActor in
                 guard let self else { return }
-                let wasConnected = self.relayState == .paired
                 self.relayState = newState
                 if newState == .disconnected {
                     self.stopAll()
-                    // Server shutdown → delete current session
-                    if wasConnected, let id = self.currentSessionId {
-                        self.sessionStore.deleteSession(id: id)
-                        self.currentSessionId = nil
-                        self.messages = []
-                    }
                 }
+            }
+        }
+
+        // Mac server explicitly disconnected from relay
+        relay.onPeerLeft = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if let id = self.currentSessionId {
+                    self.sessionStore.deleteSession(id: id)
+                    self.currentSessionId = nil
+                    self.messages = []
+                }
+                self.clearPairing()
+            }
+        }
+
+        // Mac server shut down gracefully
+        relay.onServerShutdown = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if let id = self.currentSessionId {
+                    self.sessionStore.deleteSession(id: id)
+                    self.currentSessionId = nil
+                    self.messages = []
+                }
+                self.clearPairing()
             }
         }
 
@@ -291,6 +325,20 @@ final class VoiceViewModel {
                 self.restorePairingIfNeeded()
             }
         }
+
+        // Auto-reconnect on network change (WiFi ↔ LTE)
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self else { return }
+                if path.status == .satisfied && self.relayState != .paired {
+                    log.info("Network path changed → satisfied, attempting reconnect")
+                    Task { await self.relay.reconnectIfNeeded() }
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.ghost.easy.network-monitor"))
+        self.networkMonitor = monitor
     }
 
     // MARK: - Voice Commands
@@ -313,8 +361,7 @@ final class VoiceViewModel {
     // MARK: - Utterance Queue (mcp-voice-hooks pattern)
 
     private func handleUtterance(_ text: String) {
-        isActivated = false
-
+        // SpeechService already transitioned to .delivered
         // Check for voice commands before queueing
         if let command = detectVoiceCommand(text) {
             if status == .speaking {
@@ -444,11 +491,7 @@ final class VoiceViewModel {
                         startedSpeaking = true
                         status = .speaking
                         updateActivity(status: .speaking, text: String(sentence.prefix(100)))
-                        do {
-                            try speech.startListening()
-                        } catch {
-                            log.error("mic restart during TTS: \(error)")
-                        }
+                        speech.restartToPassive()
                     }
                     tts.enqueueSentence(sentence)
 
@@ -461,11 +504,7 @@ final class VoiceViewModel {
                         status = .speaking
                         updateActivity(status: .speaking, text: String(text.prefix(100)))
                         tts.enqueueSentence(text)
-                        do {
-                            try speech.startListening()
-                        } catch {
-                            log.error("mic restart during TTS: \(error)")
-                        }
+                        speech.restartToPassive()
                     }
                 }
             }
@@ -565,7 +604,6 @@ final class VoiceViewModel {
                 status = .listening
                 error = nil
                 recognizedText = ""
-                isActivated = false
                 debugLog = "listening ok"
                 if currentActivity == nil {
                     startActivity()
@@ -690,6 +728,12 @@ final class VoiceViewModel {
                 self.error = "Relay connection failed: \(error)"
             }
         }
+    }
+
+    private func clearPairing() {
+        pairedRelayURL = nil
+        pairedRoom = nil
+        pairedServerPubKey = nil
     }
 
     func restorePairingIfNeeded() {
